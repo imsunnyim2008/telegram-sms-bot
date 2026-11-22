@@ -3,6 +3,7 @@ import asyncio
 import json
 import time
 from decimal import Decimal, InvalidOperation
+from html import escape
 
 from aiogram import F, Router
 from aiogram.exceptions import TelegramBadRequest
@@ -16,7 +17,8 @@ from .country_ui import arrange_country_offers, country_flag
 from .command_menu import PUBLIC_HELP, ADMIN_HELP
 from .db import Activation, Session, Setting, User
 from .ledger import InsufficientFunds, apply
-from .service_ui import app_label
+from .service_ui import (app_label_html, custom_emoji_unavailable,
+                         without_custom_emoji)
 
 router = Router()
 shop = None  # assigned by app.main on startup
@@ -181,17 +183,34 @@ async def remove_previous_menu(message) -> None:
         pass
 
 
-async def show_selection_menu(target, title: str, markup, *,
-                              edit: bool = False, track: bool = True):
-    """Reuse the same Telegram message for *every* menu page and Back button.
+async def send_branded_message(target, html_text: str, **kwargs):
+    """Use brand logos where supported, otherwise fall back to the app name."""
+    try:
+        return await target.answer(html_text, parse_mode="HTML", **kwargs)
+    except TelegramBadRequest as exc:
+        if not custom_emoji_unavailable(exc):
+            raise
+        return await target.answer(without_custom_emoji(html_text), **kwargs)
 
-    Editing prevents previous country pages from stacking in chat. If Telegram
-    refuses to edit an old/inaccessible menu, send a fresh one and remove the
-    stale message; no purchase or wallet action happens in this helper.
-    """
+
+async def show_selection_menu(target, title: str, markup, *,
+                              edit: bool = False, track: bool = True,
+                              parse_mode: str | None = None):
+    """Reuse the current Telegram card for menus, with optional branded HTML."""
+    async def render(method):
+        options = {'reply_markup': markup}
+        if parse_mode is not None:
+            options['parse_mode'] = parse_mode
+        try:
+            return await method(title, **options)
+        except TelegramBadRequest as exc:
+            if parse_mode == 'HTML' and custom_emoji_unavailable(exc):
+                return await method(without_custom_emoji(title), reply_markup=markup)
+            raise
+
     if edit:
         try:
-            edited = await target.edit_text(title, reply_markup=markup)
+            edited = await render(target.edit_text)
             if track:
                 await track_menu(target, edited or target)
             return edited
@@ -200,16 +219,15 @@ async def show_selection_menu(target, title: str, markup, *,
                 return
         except (AttributeError, TypeError):
             pass
-        new_menu = await target.answer(title, reply_markup=markup)
+        new_menu = await render(target.answer)
         if track:
             await track_menu(target, new_menu)
         await remove_previous_menu(target)
         return new_menu
-    new_menu = await target.answer(title, reply_markup=markup)
+    new_menu = await render(target.answer)
     if track:
         await track_menu(target, new_menu)
     return new_menu
-
 
 @router.callback_query()
 async def callbacks(callback: CallbackQuery):
@@ -255,8 +273,10 @@ async def callbacks(callback: CallbackQuery):
         elif data.startswith('buy:'):
             _, service, country = data.split(':')
             order = await shop.buy(uid, service, country)
-            await callback.message.answer(
-                f'✅ Order #{order.id}\nApp: {app_label(service)}\nNumber: {order.phone}\n'
+            await send_branded_message(
+                callback.message,
+                f'✅ Order #{order.id}\nApp: {app_label_html(service)}\n'
+                f'Number: {escape(str(order.phone))}\n'
                 f'Expires in up to {settings.activation_timeout_seconds // 60} minutes.\n'
                 'Send an SMS to this number from your authorized account. '
                 'Tap Check SMS if the message does not arrive automatically.',
@@ -592,12 +612,14 @@ async def show_orders(target, uid, *, edit: bool = False):
     for row in orders:
         number = row.phone if row.status in ('pending', 'ordering', 'received') else (
             '••••' + row.phone[-4:] if row.phone else 'hidden')
-        lines.append(f'#{row.id} • App: {app_label(row.service)} / {row.country}\n'
-                     f'{row.status} • {number} • '
+        lines.append(f'#{row.id} • App: {app_label_html(row.service)} / '
+                     f'{escape(str(row.country))}\n'
+                     f'{escape(row.status)} • {escape(number)} • '
                      f'{row.price_charged} {settings.wallet_currency} • /check {row.id}')
     await show_selection_menu(
         target, '\n'.join(lines) if lines else 'No orders yet.',
         keyboard([[('⬅️ Main menu', 'menu:home')]]), edit=edit,
+        parse_mode='HTML',
     )
 
 
@@ -628,14 +650,15 @@ async def check_sms(target, user_id: int, activation_id: int, *, edit: bool = Fa
     """Owner-only SMS lookup; inline refresh edits the receipt instead of spamming chat."""
     async def respond(text: str, *, active: bool = False) -> None:
         if not edit:
-            await target.answer(text)
+            await send_branded_message(target, text)
             return
         rows = []
         if active:
             rows += [[('🔄 Check SMS now', f'check:{activation_id}')],
                      [('❌ Cancel order', f'cancel:{activation_id}')]]
         rows.append([('⬅️ Main menu', 'menu:home')])
-        await show_selection_menu(target, text, keyboard(rows), edit=True, track=False)
+        await show_selection_menu(target, text, keyboard(rows), edit=True, track=False,
+                                  parse_mode='HTML')
 
     if activation_id <= 0:
         await respond('Invalid order number.')
@@ -654,8 +677,8 @@ async def check_sms(target, user_id: int, activation_id: int, *, edit: bool = Fa
             await Worker(shop).poll_order(activation_id)
         except Exception:
             await respond(
-                f'Order #{activation_id}\nApp: {app_label(service)}\n'
-                f'Number: {phone or "not assigned"}\n'
+                f'Order #{activation_id}\nApp: {app_label_html(service)}\n'
+                f'Number: {escape(str(phone or "not assigned"))}\n'
                 'Provider status temporarily unavailable. Your order is still saved.',
                 active=True,
             )
@@ -670,13 +693,13 @@ async def check_sms(target, user_id: int, activation_id: int, *, edit: bool = Fa
         phone = row.phone
         service = row.service
     if code and status in ('received', 'completed'):
-        await respond(f'🔐 Code for order #{activation_id}: {code}\n'
-                      f'App: {app_label(service)}\nStatus: {status}'
-                      + (f'\nNumber: {phone}' if phone else ''))
+        await respond(f'🔐 Code for order #{activation_id}: {escape(code)}\n'
+                      f'App: {app_label_html(service)}\nStatus: {escape(status)}'
+                      + (f'\nNumber: {escape(str(phone))}' if phone else ''))
     elif status == 'pending':
         await respond(
-            f'Order #{activation_id}\nApp: {app_label(service)}\n'
-            f'Number: {phone or "not assigned"}\n'
+            f'Order #{activation_id}\nApp: {app_label_html(service)}\n'
+            f'Number: {escape(str(phone or "not assigned"))}\n'
             'Waiting for an SMS at the provider. '
             'If the sender has not sent a code, Friday cannot create one. '
             'Use Check SMS to refresh, or cancel a pending order if unused.',
