@@ -11,7 +11,7 @@ from .config import settings
 from .db import Activation, Payment, Session, Setting, User, utcnow
 from .gateway import CryptoBot
 from .ledger import InsufficientFunds, apply
-from .provider import AmbiguousPurchase, FiveSim, PriceItem, ProviderError
+from .provider import AmbiguousPurchase, PriceItem, ProviderError, ProviderClient
 
 log = logging.getLogger(__name__)
 Q = Decimal('.0001')
@@ -24,7 +24,7 @@ class BotError(Exception):
 
 
 class Shop:
-    def __init__(self, provider: FiveSim, gateway: CryptoBot, notifier: Any):
+    def __init__(self, provider: ProviderClient, gateway: CryptoBot, notifier: Any):
         self.provider = provider
         self.gateway = gateway
         self.notifier = notifier
