@@ -21,7 +21,7 @@ from .provider import AmbiguousPurchase, PriceItem, ProviderError
 log = logging.getLogger(__name__)
 BASE = "https://www.textverified.com"
 SLUG = re.compile(r"^[a-z0-9_]{1,50}$")
-ORDER_ID = re.compile(r"^[a-zA-Z0-9_-]{1,120}$")
+ORDER_ID = re.compile(r"^[a-zA-Z0-9_-]{1,90}$")
 US = "us"
 
 
@@ -152,7 +152,9 @@ class TextVerifiedSms:
                 raise ProviderError("TextVerified service catalogue unavailable")
             allowed = {}
             for row in data:
-                if not isinstance(row, dict) or str(row.get("capability", "")).lower() != "sms":
+                if (not isinstance(row, dict) or
+                        str(row.get("capability", "")).lower() not in
+                        {"sms", "smsandvoicecombo"}):
                     continue
                 name = str(row.get("serviceName", "")).lower()
                 if SLUG.fullmatch(name) and settings.service_allowed(name):
@@ -213,7 +215,14 @@ class TextVerifiedSms:
             raise AmbiguousPurchase("TextVerified did not return a verification link")
         path = self._safe_path(creation.get("href", ""))
         # Follow the action link to retrieve the purchased number (safe GET).
-        details = await self._request("GET", path)
+        # A paid POST may already have created a number. Even if the follow-up
+        # GET fails, NEVER tell Shop it was a failed purchase and refund it.
+        try:
+            details = await self._request("GET", path)
+        except ProviderError as exc:
+            raise AmbiguousPurchase(
+                "TextVerified number allocated but details unavailable; manual review required"
+            ) from exc
         try:
             oid = str(details["id"])
             phone = str(details["number"])
@@ -269,7 +278,7 @@ class TextVerifiedSms:
             codes.sort(key=lambda x: x[0])
             return {"status": "RECEIVED", "sms": [{"code": codes[-1][1]}]}
         if state in ("verificationrefunded", "verificationcanceled"):
-            # Canceled alone does not prove a wallet credit; refund needs confirmation.
+            # Only a confirmed provider refund can release reserved wallet funds.
             return {"status": "CANCELLED" if state == "verificationrefunded" else "PENDING",
                     "sms": []}
         if state == "verificationtimedout":
