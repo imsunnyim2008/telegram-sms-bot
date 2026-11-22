@@ -95,9 +95,13 @@ async def callbacks(callback: CallbackQuery):
             await callback.message.answer(
                 f'✅ Order #{order.id}\nNumber: {order.phone}\n'
                 f'Expires in up to {settings.activation_timeout_seconds // 60} minutes.\n'
-                'Send an SMS to this number from your authorized account; the code will arrive here.',
-                reply_markup=keyboard([[('❌ Cancel order', f'cancel:{order.id}')]]),
+                'Send an SMS to this number from your authorized account. '
+                'Tap Check SMS if the message does not arrive automatically.',
+                reply_markup=keyboard([[('🔄 Check SMS now', f'check:{order.id}')],
+                                       [('❌ Cancel order', f'cancel:{order.id}')]]),
             )
+        elif data.startswith('check:'):
+            await check_sms(callback.message, uid, int(data.split(':')[1]))
         elif data.startswith('cancel:'):
             await shop.cancel(uid, int(data.split(':')[1]))
             await callback.message.answer('Cancellation submitted. Check /orders for current status.')
@@ -190,7 +194,7 @@ async def show_orders(target, uid):
         number = row.phone if row.status in ('pending', 'ordering', 'received') else (
             '••••' + row.phone[-4:] if row.phone else 'hidden')
         lines.append(f'#{row.id} {row.service} / {row.country}: {row.status} • {number} • '
-                     f'{row.price_charged} {settings.wallet_currency}')
+                     f'{row.price_charged} {settings.wallet_currency} • /check {row.id}')
     await target.answer('\n'.join(lines))
 
 
@@ -204,6 +208,55 @@ async def buy_command(message: Message):
 async def balance_command(message: Message):
     if await allowed(message.from_user.id, message):
         await show_balance(message, message.from_user.id)
+
+
+async def check_sms(target, user_id: int, activation_id: int) -> None:
+    """Owner-only, on-demand provider lookup when the free server was asleep."""
+    if activation_id <= 0:
+        await target.answer('Invalid order number.')
+        return
+    async with Session() as s:
+        row = await s.get(Activation, activation_id)
+        if row is None or row.user_id != user_id:
+            await target.answer('Order not found.')
+            return
+        status = row.status
+    if status in ('pending', 'received'):
+        from .workers import Worker
+        try:
+            await Worker(shop).poll_order(activation_id)
+        except Exception:
+            await target.answer('Provider status temporarily unavailable. Your order is still saved.')
+            return
+    async with Session() as s:
+        row = await s.get(Activation, activation_id)
+        if row is None or row.user_id != user_id:
+            await target.answer('Order not found.')
+            return
+        status = row.status
+        code = row.code
+    if code and status in ('received', 'completed'):
+        await target.answer(f'🔐 Code for order #{activation_id}: {code}\nStatus: {status}')
+    elif status == 'pending':
+        await target.answer(
+            f'Order #{activation_id}: waiting for an SMS at the provider. '
+            'If the sender has not sent a code, Friday cannot create one. '
+            'Use /check again to refresh, or cancel a pending order if unused.')
+    elif status == 'manual_review':
+        await target.answer('This order requires support review. Your reserved funds are protected.')
+    else:
+        await target.answer(f'Order #{activation_id}: {status}. Check /balance for any confirmed refund.')
+
+
+@router.message(Command('check'))
+async def check_command(message: Message):
+    if not await allowed(message.from_user.id, message):
+        return
+    parts = (message.text or '').split()
+    if len(parts) != 2 or not parts[1].isdigit():
+        await message.answer('Usage: /check ORDER_ID (see /orders)')
+        return
+    await check_sms(message, message.from_user.id, int(parts[1]))
 
 
 @router.message(Command('orders'))
