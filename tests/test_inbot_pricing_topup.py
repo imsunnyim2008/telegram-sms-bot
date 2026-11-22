@@ -3,6 +3,7 @@ from decimal import Decimal
 from types import SimpleNamespace
 
 import pytest
+import pytest_asyncio
 from sqlalchemy import select, func
 from sqlalchemy.ext.asyncio import async_sessionmaker, create_async_engine
 
@@ -61,7 +62,7 @@ class Notifier:
         pass
 
 
-@pytest.fixture
+@pytest_asyncio.fixture
 async def setup_database(monkeypatch):
     engine = create_async_engine('sqlite+aiosqlite:///:memory:')
     async with engine.begin() as conn:
