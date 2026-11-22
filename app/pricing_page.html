@@ -1,0 +1,135 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1,viewport-fit=cover">
+<meta name="theme-color" content="#0c1328">
+<meta http-equiv="Cache-Control" content="no-store">
+<title>Friday | Price Manager</title>
+<script src="https://telegram.org/js/telegram-web-app.js"></script>
+<style>
+:root{color-scheme:dark;--bg:#091126;--panel:#141e36;--panel2:#1c2945;--border:#2b3958;--muted:#9daecb;--text:#f8fbff;--blue:#547bff;--blue2:#2863ed;--mint:#68edbe;--red:#ff9aa9;--gold:#ffd382}
+*{box-sizing:border-box}html{scroll-behavior:smooth}body{background:radial-gradient(ellipse at top,#172f65 0,transparent 38%),var(--bg);color:var(--text);margin:0;font-family:-apple-system,BlinkMacSystemFont,Inter,system-ui,sans-serif;-webkit-font-smoothing:antialiased}
+main{max-width:940px;margin:auto;padding:24px 18px 70px}.top{display:flex;gap:16px;align-items:center;justify-content:space-between;margin-bottom:24px}.brand{display:flex;gap:13px;align-items:center}.icon{width:49px;height:49px;background:#2364e7;border-radius:16px;display:grid;place-items:center;font-size:25px;box-shadow:0 10px 26px #09369955}.brand h1{font-size:23px;margin:0;letter-spacing:-.8px}.eyebrow{font-size:11px;font-weight:800;letter-spacing:1.7px;color:#98b1ef;text-transform:uppercase}.sub{font-size:13px;color:var(--muted);margin-top:5px}.pill{border:1px solid #3a5d83;background:#102d4c;border-radius:40px;color:var(--mint);padding:9px 13px;font-size:12px;font-weight:700;white-space:nowrap}
+.hero{padding:24px;background:linear-gradient(120deg,#1f46a8,#0f2661 70%,#132b53);border:1px solid #4978ce;border-radius:22px;margin-bottom:17px;box-shadow:0 18px 34px #01061630}.hero h2{font-size:28px;line-height:1.12;letter-spacing:-1px;margin:8px 0 12px}.hero p{font-size:14px;line-height:1.55;color:#d1ddff;margin:0;max-width:600px}
+.stats{display:grid;grid-template-columns:repeat(3,minmax(0,1fr));gap:11px;margin-bottom:18px}.stat{padding:15px;background:var(--panel);border:1px solid var(--border);border-radius:16px}.stat small{display:block;font-size:11px;color:var(--muted);line-height:1.4}.stat strong{display:block;font-size:18px;letter-spacing:-.6px;margin-top:5px}
+.card{background:var(--panel);border:1px solid var(--border);border-radius:20px;padding:20px;margin-bottom:18px}.card h3{font-size:17px;letter-spacing:-.35px;margin:0 0 6px}.hint{margin:0;color:var(--muted);font-size:12px;line-height:1.55}.row{display:flex;gap:10px;align-items:end;flex-wrap:wrap;margin-top:17px}label{font-size:12px;font-weight:700;color:#c6d3ea;display:block;margin-bottom:7px}.field{flex:1;min-width:130px}input,select,button{font:inherit}input,select{width:100%;background:#09172f;border:1px solid #435273;color:white;outline:none;border-radius:12px;padding:13px 12px;font-size:14px;min-height:46px}input:focus,select:focus{border-color:var(--blue);box-shadow:0 0 0 3px #547bff25}button{cursor:pointer;border:0;border-radius:12px;min-height:45px;padding:10px 16px;font-size:13px;font-weight:800;transition:transform .1s ease,opacity .1s ease}button:active{transform:scale(.98)}button:disabled{cursor:not-allowed;opacity:.45}.primary{background:var(--blue);color:white}.primary:hover{background:var(--blue2)}.secondary{background:#253650;color:#d7e3f9;border:1px solid #3b5074}.filters{display:flex;gap:9px;margin-top:18px;align-items:center}.filters input{flex:2}.filters select{flex:1;max-width:205px}.offer{padding:14px 0;border-bottom:1px solid #2a3853}.offer:last-child{border:0}.offer-head{display:flex;justify-content:space-between;align-items:center;gap:7px}.place{font-size:16px;font-weight:750;display:flex;align-items:center;gap:8px}.flag{font-size:24px;flex:0 0 auto}.badge{font-size:10px;font-weight:800;letter-spacing:.2px;border:1px solid #4c5b7b;border-radius:999px;color:#b8c6df;padding:4px 8px;white-space:nowrap}.badge.custom{color:var(--mint);border-color:#328266;background:#194437}.meta{display:flex;gap:11px;flex-wrap:wrap;color:var(--muted);font-size:11px;margin:7px 0 10px}.meta strong{color:#e2edff}.offer-actions{display:flex;gap:8px;align-items:center}.price-box{position:relative;flex:1;max-width:190px}.price-box input{padding-right:46px;font-size:15px;font-weight:800}.price-box span{position:absolute;right:13px;top:15px;color:#92a9d2;font-size:11px;font-weight:800}.offer-actions button{min-width:66px}#notice{display:none;border-radius:12px;background:#3a2432;color:#ffb0b9;padding:14px;margin-bottom:18px;font-size:13px;line-height:1.5}#notice.visible{display:block}.statusline{display:flex;align-items:center;justify-content:space-between;gap:10px;margin:8px 0 2px}.statusline small{color:var(--muted)}.loading{text-align:center;padding:32px;color:var(--muted)}#more{width:100%;margin-top:13px}.footer{text-align:center;font-size:12px;line-height:1.65;color:var(--muted);margin-top:19px}.toast{position:fixed;bottom:calc(env(safe-area-inset-bottom) + 25px);left:50%;transform:translateX(-50%);background:#17452f;border:1px solid #3bba8a;box-shadow:0 16px 30px #0007;padding:12px 18px;border-radius:12px;color:#ccffe7;font-size:13px;font-weight:700;max-width:90vw;min-width:225px;text-align:center;z-index:2;display:none}.toast.show{display:block}
+@media(max-width:480px){main{padding:18px 13px 65px}.top{margin-bottom:18px}.brand h1{font-size:21px}.pill{font-size:10px;padding:8px 9px}.hero{padding:20px}.hero h2{font-size:26px}.stats{gap:7px}.stat{padding:11px 9px}.stat strong{font-size:16px}.card{padding:15px}.filters select{max-width:130px}.place{font-size:14px}.meta{gap:7px}.offer-actions button{padding:10px 11px;min-width:58px}}
+</style>
+</head>
+<body>
+<main>
+  <header class="top"><div class="brand"><div class="icon">🔐</div><div><div class="eyebrow">FRIDAY · CONTROL PANEL</div><h1>Price Manager</h1><div class="sub">Your live SMS marketplace</div></div></div><div class="pill">● Admin only</div></header>
+  <section class="hero"><div class="eyebrow">PRICING CONTROL</div><h2>Your store.<br>Your prices.</h2><p>Adjust your markup or set the exact selling price for each service and country. Every saved change updates the next customer quote and purchase.</p></section>
+  <div id="notice"></div>
+  <section class="stats"><div class="stat"><small>Live offers</small><strong id="offerCount">—</strong></div><div class="stat"><small>Custom prices</small><strong id="customCount">—</strong></div><div class="stat"><small>Currency</small><strong id="currency">USD</strong></div></section>
+  <section class="card"><h3>📈 Global markup</h3><p class="hint">Default profit percentage added to provider cost when a country does not have its own price.</p><div class="row"><div class="field"><label for="markup">Profit markup (%)</label><input id="markup" type="number" min="0" max="500" step=".01" inputmode="decimal" placeholder="50"></div><button class="primary" id="saveMarkup">Save markup</button></div></section>
+  <section class="card"><div class="statusline" style="margin:0"><div><h3>🌍 Country & service prices</h3><p class="hint">Edit an individual price, then tap Save.</p></div><button class="secondary" id="refresh" style="min-width:70px">↻ Refresh</button></div>
+    <div class="filters"><input id="search" placeholder="Search countries…" autocomplete="off" aria-label="Search countries"><select id="service" aria-label="Filter service"><option value="">All services</option></select></div>
+    <div class="statusline"><small id="shown">Loading prices…</small><small>Prices in <span id="listCurrency">USD</span></small></div>
+    <div id="offers" aria-live="polite"><div class="loading">Connecting securely to Friday…</div></div><button id="more" class="secondary" style="display:none">Show more ↓</button>
+  </section>
+  <div class="footer">🔒 Access requires your verified Telegram administrator account.<br>Fixed prices are never allowed below current provider cost. If costs rise, Friday protects the minimum selling price automatically.</div>
+</main><div id="toast" class="toast" role="status"></div>
+<script>
+(function(){
+  'use strict';
+  const tg = window.Telegram && window.Telegram.WebApp;
+  if (tg) { tg.ready(); tg.expand(); }
+  const session = tg && tg.initData ? tg.initData : '';
+  const $ = id => document.getElementById(id);
+  const state = {offers:[],currency:'USD',count:40,search:'',service:''};
+  let toastTimer;
+
+  function notice(message) { $('notice').textContent=message; $('notice').classList.toggle('visible',!!message); }
+  function toast(message) { $('toast').textContent=message; $('toast').classList.add('show');clearTimeout(toastTimer);toastTimer=setTimeout(()=>$('toast').classList.remove('show'),2700); }
+  async function api(method, body) {
+    const options={method,cache:'no-store',headers:{'X-Telegram-Init-Data':session}};
+    if (body) {options.headers['Content-Type']='application/json';options.body=JSON.stringify(body);}
+    const response=await fetch('/admin/api/pricing',options);
+    let data;
+    try {data=await response.json();} catch(e) {throw Error('Server returned an unreadable response');}
+    if(!response.ok) throw Error(data.detail || 'Request failed');
+    return data;
+  }
+  function fmt(value){return Number(value).toFixed(4);}
+  function actionButton(label,style,handler) {const btn=document.createElement('button');btn.type='button';btn.textContent=label;btn.className=style;btn.addEventListener('click',handler);return btn;}
+  async function reload(){
+    if(!session){notice('Open this page using /pricing inside your private Friday Telegram bot chat. The web browser cannot securely verify your administrator account.');$('offers').textContent='';return;}
+    notice('');
+    try{
+      const data=await api('GET');
+      state.offers=data.offers || [];
+      state.currency=data.currency || 'USD';
+      $('currency').textContent=state.currency;
+      $('listCurrency').textContent=state.currency;
+      $('offerCount').textContent=String(data.count);
+      $('customCount').textContent=String(state.offers.filter(x=>x.custom!==null).length);
+      $('markup').value=data.markup;
+      const selected=$('service').value;
+      $('service').replaceChildren();
+      const all=document.createElement('option');all.value='';all.textContent='All services';$('service').append(all);
+      Array.from(new Set(state.offers.map(x=>x.service))).sort().forEach(name=>{
+        const opt=document.createElement('option');opt.value=name;opt.textContent=name.charAt(0).toUpperCase()+name.slice(1);$('service').append(opt);
+      });
+      $('service').value=selected;state.count=40;render();
+    }catch(e){notice('Unable to load prices: '+e.message);$('offers').textContent='';$('shown').textContent='Not connected';}
+  }
+  function render(){
+    const query=$('search').value.trim().toLowerCase(),filter=$('service').value;
+    const data=state.offers.filter(x=>(!filter || x.service===filter) &&
+       (!query || x.country.toLowerCase().includes(query)||x.service.toLowerCase().includes(query)||x.country_id.includes(query)));
+    $('shown').textContent='Showing '+Math.min(state.count,data.length)+' of '+data.length+' available prices';
+    $('offers').replaceChildren();
+    if(!data.length){const empty=document.createElement('div');empty.className='loading';empty.textContent='No matching countries. Try another search.';$('offers').append(empty);}
+    data.slice(0,state.count).forEach(item=>{
+      const card=document.createElement('article');card.className='offer';
+      const head=document.createElement('div');head.className='offer-head';
+      const place=document.createElement('div');place.className='place';
+      const flag=document.createElement('span');flag.className='flag';flag.textContent=item.flag;
+      const title=document.createElement('span');title.textContent=item.country;
+      place.append(flag,title);
+      const badge=document.createElement('span');badge.className='badge'+(item.custom!==null?' custom':'');
+      badge.textContent=item.custom!==null?'Custom price':'Markup price';
+      head.append(place,badge);
+      const info=document.createElement('div');info.className='meta';
+      for(const t of [item.service.toUpperCase(),'Cost '+fmt(item.base_cost)+' '+state.currency,'Stock '+item.stock,'Current '+fmt(item.price)+' '+state.currency]){
+        const x=document.createElement('span');x.textContent=t;info.append(x);
+      }
+      const row=document.createElement('div');row.className='offer-actions';
+      const box=document.createElement('div');box.className='price-box';
+      const input=document.createElement('input');input.type='number';input.step='0.0001';input.min=item.base_cost;input.max='1000';input.inputMode='decimal';input.value=item.custom!==null?item.custom:item.price;input.setAttribute('aria-label','Price for '+item.country+' '+item.service);
+      const unit=document.createElement('span');unit.textContent=state.currency;box.append(input,unit);
+      const save=actionButton('Save','primary',async()=>{
+        const value=input.value.trim();
+        if(!value||!Number.isFinite(Number(value))||Number(value)<Number(item.base_cost)){notice('Price must be at least '+fmt(item.base_cost)+' '+state.currency);return;}
+        save.disabled=true;reset.disabled=true;notice('');
+        try{await api('POST',{action:'set',service:item.service,country_id:item.country_id,value});toast(item.country+' price updated');await reload();}
+        catch(e){notice(e.message);}finally{save.disabled=false;reset.disabled=false;}
+      });
+      const reset=actionButton('Reset','secondary',async()=>{
+        reset.disabled=true;save.disabled=true;notice('');
+        try{await api('POST',{action:'reset',service:item.service,country_id:item.country_id});toast('Default markup restored');await reload();}
+        catch(e){notice(e.message);}finally{reset.disabled=false;save.disabled=false;}
+      });
+      reset.disabled=item.custom===null;
+      row.append(box,save,reset);card.append(head,info,row);$('offers').append(card);
+    });
+    $('more').style.display=data.length>state.count?'block':'none';
+  }
+  $('search').addEventListener('input',()=>{state.count=40;render();});
+  $('service').addEventListener('change',()=>{state.count=40;render();});
+  $('more').addEventListener('click',()=>{state.count+=40;render();});
+  $('refresh').addEventListener('click',reload);
+  $('saveMarkup').addEventListener('click',async()=>{
+    const value=$('markup').value;notice('');
+    if(!value){notice('Enter a markup percentage first');return;}
+    $('saveMarkup').disabled=true;
+    try{await api('POST',{action:'markup',value});toast('Global markup saved');await reload();}
+    catch(e){notice(e.message);}finally{$('saveMarkup').disabled=false;}
+  });
+  reload();
+})();
+</script>
+</body>
+</html>
