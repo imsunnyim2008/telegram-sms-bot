@@ -281,3 +281,27 @@ async def test_ipn_webhook_accepts_signed_event_without_invoice_id(monkeypatch):
         invalid = await client.post('/webhook/nowpayments', content=raw,
                 headers={'x-nowpayments-sig':'invalid','content-type':'application/json'})
         assert invalid.status_code == 401
+
+
+
+def test_official_nowpayments_python_hmac_recipe_with_unicode(monkeypatch):
+    # NOWPayments explicitly uses json.dumps(..., sort_keys=True) with default
+    # ensure_ascii=True in its official Python webhook verification example.
+    monkeypatch.setattr(settings, 'nowpayments_ipn_secret', 'demo-only-ipn-key')
+    webhook = {'payment_id': 222, 'order_id': 'friday-topup-1',
+               'order_description': 'Test café', 'payment_status': 'finished',
+               'fee': {'withdrawalFee': 0.01, 'depositFee': 0}}
+    sorted_msg = json.dumps(webhook, separators=(',', ':'), sort_keys=True)
+    signature = hmac.new(b'demo-only-ipn-key', sorted_msg.encode(),
+                         hashlib.sha512).hexdigest()
+    assert NowPayments.verify_webhook(json.dumps(webhook).encode(), signature)
+    changed = dict(webhook, payment_status='waiting')
+    assert not NowPayments.verify_webhook(json.dumps(changed).encode(), signature)
+
+
+def test_official_nowpayments_hmac_rejects_wrong_key(monkeypatch):
+    webhook = {'payment_id': 222, 'payment_status': 'finished'}
+    signed = hmac.new(b'real-key-demo', json.dumps(webhook, separators=(',', ':'),
+                      sort_keys=True).encode(), hashlib.sha512).hexdigest()
+    monkeypatch.setattr(settings, 'nowpayments_ipn_secret', 'incorrect-key-demo')
+    assert not NowPayments.verify_webhook(json.dumps(webhook).encode(), signed)
