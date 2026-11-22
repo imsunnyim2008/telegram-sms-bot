@@ -287,6 +287,61 @@ async def admin_setupcheck(message: Message):
     await message.answer('\n'.join(lines))
 
 
+@router.message(Command('testall'))
+async def admin_testall(message: Message):
+    """Safe read-only production diagnostics. Never creates paid orders."""
+    if not admin_only(message):
+        return await message.answer('Admin only')
+    lines = ['🧪 Friday system check (read-only)',
+             'Telegram messaging: OK',
+             f'Provider: {settings.provider_name}',
+             f'Payment gateway: {settings.payment_provider}']
+    try:
+        async with Session() as s:
+            users = await s.scalar(select(func.count()).select_from(User))
+            orders = await s.scalar(select(func.count()).select_from(Activation))
+            from .db import LedgerEntry, Payment
+            invoices = await s.scalar(select(func.count()).select_from(Payment))
+            paid = await s.scalar(select(func.count()).select_from(Payment)
+                                  .where(Payment.status == 'paid'))
+            mismatches = await s.scalar(select(func.count()).select_from(User).where(
+                User.balance != (
+                    select(func.coalesce(func.sum(LedgerEntry.amount), 0))
+                    .where(LedgerEntry.user_id == User.id).scalar_subquery())))
+        lines.append(f'Database: OK • {users} users, {orders} orders, {invoices} invoices')
+        lines.append(f'Credited invoices: {paid}')
+        lines.append('Wallet ledger: ' +
+                     ('OK' if mismatches == 0 else f'REVIEW {mismatches} inconsistent wallets'))
+    except Exception:
+        lines.append('Database / ledger: FAILED — inspect Render logs')
+    if settings.provider_api_key:
+        try:
+            balance = await shop.provider.get_balance()
+            prices = await shop.provider.get_prices()
+            lines.append(f'Grizzly: OK • balance {balance}, {len(prices)} stocked offers')
+        except Exception:
+            lines.append('Grizzly API: FAILED (balance or stock lookup)')
+    else:
+        lines.append('Grizzly API: NOT CONFIGURED')
+    if settings.payment_provider == 'nowpayments':
+        if not settings.nowpayments_api_key:
+            lines.append('NOWPayments API: MISSING')
+        else:
+            try:
+                await shop.gateway.check_credentials()
+                lines.append('NOWPayments API: OK')
+            except Exception:
+                lines.append('NOWPayments API: FAILED')
+        lines.append('IPN secret: ' + ('SET' if settings.nowpayments_ipn_secret else 'MISSING'))
+    else:
+        lines.append('Payment provider: Crypto Bot (NOWPayments inactive)')
+    lines.append('Payments enabled: ' + ('YES' if settings.payment_ready else 'NO'))
+    lines.append('SMS buying enabled: ' + ('YES' if settings.live_ready else 'NO'))
+    lines.append('⚠️ Provider payments, incoming IPNs, SMS arrival and refunds require'
+                 ' separate real-world tests. No money moved by this check.')
+    await message.answer('\n'.join(lines))
+
+
 @router.message(Command('adjust'))
 async def admin_adjust(message: Message):
     if not admin_only(message):
