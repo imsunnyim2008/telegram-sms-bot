@@ -20,6 +20,7 @@ PUBLIC_COMMANDS = [
     BotCommand(command='orders', description='View your purchased numbers'),
     BotCommand(command='check', description='Check SMS for an order'),
     BotCommand(command='help', description='How to use Friday'),
+    BotCommand(command='clear', description='Clear recent chat messages'),
 ]
 
 PUBLIC_HELP = (
@@ -27,10 +28,11 @@ PUBLIC_HELP = (
     '/start — Open the main menu\n'
     '/buy — Choose an SMS service and country\n'
     '/balance — Check your wallet balance\n'
-    '/topup 5 — Deposit $5 (or enter another amount)\n'
+    '/topup — Enter your deposit amount (minimum $5)\n'
     '/orders — Show recent purchases\n'
     '/check 7 — Check SMS for order #7 (replace 7 with your order ID)\n'
-    '/help — Show these instructions\n\n'
+    '/help — Show these instructions\n'
+    '/clear — Clear recent chat messages (confirmation required)\n\n'
     'Use the blue Menu button beside the message field to access these commands. '
     'Only buy numbers for accounts you own or are authorized to test.'
 )
@@ -38,8 +40,10 @@ PUBLIC_HELP = (
 ADMIN_HELP = (
     '⚙️ Friday · Admin Settings\n\n'
     '💵 Pricing\n'
-    '/pricing — Open your web price manager\n'
-    '/markup 50 — Set global markup percentage\n\n'
+    '/setprice — Set a public selling price in this chat\n'
+    '/pricing — Also opens in-chat pricing\n'
+    '/markup 50 — Set global markup percentage\n'
+    '/cancel — Cancel an unfinished price or deposit entry\n\n'
     '🧪 Diagnostics\n'
     '/setupcheck — Check provider/payment setup\n'
     '/testall — Run read-only system diagnostics\n'
