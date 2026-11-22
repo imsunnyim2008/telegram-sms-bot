@@ -33,6 +33,7 @@ class Target:
 
 class Provider:
     def __init__(self):
+        self.order_seq = 665
         self.offers = [
             PriceItem('telegram', '12', Decimal('0.45'), 100),
             PriceItem('whatsapp', '12', Decimal('0.25'), 100),
@@ -45,7 +46,8 @@ class Provider:
         return Decimal('20')
     async def buy_number(self, service, country, max_price):
         assert (service, country, max_price) == ('telegram', '12', Decimal('.45'))
-        return {'id': 666, 'phone': '15557778888', 'price': Decimal('.45')}
+        self.order_seq += 1
+        return {'id': self.order_seq, 'phone': '15557778888', 'price': Decimal('.45')}
 
 
 class Gateway:
