@@ -11,7 +11,7 @@ import app.handlers as handlers
 import app.business as business
 from app.business import Shop
 from app.config import settings
-from app.db import Base, User, Payment, LedgerEntry
+from app.db import Base, User, Payment, LedgerEntry, Setting
 from app.provider import PriceItem
 
 
@@ -167,6 +167,40 @@ async def test_administrator_can_select_country_and_set_only_public_price(setup_
         admin_debits = (await db.scalars(select(LedgerEntry).where(
             LedgerEntry.user_id == 7031009238, LedgerEntry.type == 'purchase'))).all()
         assert len(admin_debits) == 1 and admin_debits[0].amount == Decimal('-.4500')
+
+
+@pytest.mark.asyncio
+async def test_country_callbacks_and_purchase_previews_use_viewer_identity(setup_database):
+    session, shop, _ = setup_database
+    async with session.begin() as db:
+        db.add(Setting(key='price:telegram:12', value='0.9500'))
+
+    class Callback:
+        def __init__(self, uid, data, target):
+            self.from_user = SimpleNamespace(id=uid, username='test')
+            self.data = data
+            self.message = target
+
+        async def answer(self, *args, **kwargs):
+            pass
+
+    admin = Target(uid=7031009238)
+    customer = Target(uid=99)
+    await handlers.callbacks(Callback(7031009238, 'countries:telegram:0', admin))
+    admin_button = admin.edits[-1][1]['reply_markup'].inline_keyboard[0][0]
+    assert '0.4500 USD' in admin_button.text
+    assert '0.9500 USD' not in admin_button.text
+
+    await handlers.callbacks(Callback(99, 'countries:telegram:0', customer))
+    customer_button = customer.edits[-1][1]['reply_markup'].inline_keyboard[0][0]
+    assert '0.9500 USD' in customer_button.text
+    assert '0.4500 USD' not in customer_button.text
+
+    await handlers.callbacks(Callback(7031009238, 'preview:telegram:12', admin))
+    assert 'Original provider price: 0.4500 USD' in admin.answers[-1][0]
+    await handlers.callbacks(Callback(99, 'preview:telegram:12', customer))
+    assert 'Total price: 0.9500 USD' in customer.answers[-1][0]
+    assert '0.4500' not in customer.answers[-1][0]
 
 
 @pytest.mark.asyncio
