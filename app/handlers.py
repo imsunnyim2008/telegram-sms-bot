@@ -1296,3 +1296,81 @@ async def admin_resolve(message: Message):
             await message.answer('Order was already resolved')
     except (IndexError, ValueError):
         await message.answer('Usage: /resolve ORDER_ID refund (manual review only)')
+
+
+
+@router.message(Command('cancel', ignore_case=True))
+async def cancel_flow_command(message: Message):
+    await clear_flow(message.from_user.id)
+    await message.answer('Cancelled. Use /start to open the menu.')
+
+
+@router.message(Command('clear', ignore_case=True))
+async def clear_chat_command(message: Message):
+    if message.chat.type != 'private':
+        return await message.answer('Chat cleanup is available only in a private chat.')
+    await message.answer(
+        '🧹 Clear Friday chat?\n'
+        'This deletes recent Telegram messages from this private chat, '
+        'including messages containing verification codes.\n'
+        'Telegram bots cannot delete messages older than 48 hours or guarantee '
+        'removal of the entire history. Your wallet and orders are NOT deleted.\n'
+        'For a complete history wipe, use Telegram > Clear History.',
+        reply_markup=keyboard([
+            [('🗑️ Yes, clear recent messages', 'clear:confirm')],
+            [('Cancel', 'clear:cancel')],
+        ]),
+    )
+
+
+async def clear_chat_confirm(target, uid: int):
+    if not hasattr(target, 'chat') or target.chat.type != 'private' or target.chat.id != uid:
+        await target.answer('Chat cleanup is only available in your own private chat.')
+        return
+    # Telegram's deleteMessages API accepts at most 100 IDs at a time,
+    # and messages over 48h old cannot be deleted. Scan up to 500 recent IDs.
+    last = target.message_id
+    errors = 0
+    for _ in range(5):
+        if last <= 0:
+            break
+        first = max(1, last - 99)
+        try:
+            await target.bot.delete_messages(
+                chat_id=uid, message_ids=list(range(first, last + 1)))
+        except Exception:
+            errors += 1
+        last = first - 1
+    await clear_flow(uid)
+    if errors:
+        await target.answer(
+            '🧹 Tried clearing recent messages. Some older or protected messages '
+            'could not be removed. For the entire chat, use Telegram > Clear History.'
+        )
+    # If all delete requests succeeded, leave the chat empty.
+
+
+@router.message(F.text)
+async def handle_pending_text(message: Message):
+    # Only input explicitly requested by this bot is interpreted as an amount.
+    # Do not process random texts, group messages, or bot commands as payment input.
+    if message.chat.type != 'private' or not message.from_user:
+        return
+    raw = (message.text or '').strip()
+    if not raw or raw.startswith('/'):
+        return
+    uid = message.from_user.id
+    flow = await read_flow(uid)
+    if not flow:
+        return
+    if flow.get('type') == 'topup':
+        if await allowed(uid, message):
+            await send_topup_invoice(message, uid, raw)
+    elif flow.get('type') == 'price':
+        if uid not in settings.admins:
+            await clear_flow(uid)
+            return await message.answer('Admin only')
+        try:
+            await admin_price_save(message, uid, flow, raw)
+        except BotError as exc:
+            await message.answer(str(exc))
