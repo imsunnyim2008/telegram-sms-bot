@@ -82,7 +82,7 @@ async def test_country_list_paginations_edit_same_message_not_send_new_ones(monk
 
     class Shop:
         provider = Provider()
-        async def price(self, item):
+        async def price(self, item, user_id=None):
             return item.cost
 
     async def allowed(uid, message):

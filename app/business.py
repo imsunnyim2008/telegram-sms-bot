@@ -71,9 +71,19 @@ class Shop:
             return max(minimum, custom.quantize(Q, rounding=ROUND_UP))
         return (base * (1 + markup / 100)).quantize(Q, rounding=ROUND_UP)
 
-    async def price(self, item: PriceItem) -> Decimal:
+    @staticmethod
+    def original_price(item: PriceItem) -> Decimal:
+        """The provider's live price converted to the wallet currency, with no markup."""
         if settings.provider_price_to_wallet <= 0:
             raise BotError('Prices are not configured. Ask the admin to verify provider currency.')
+        return (item.cost * settings.provider_price_to_wallet).quantize(Q, rounding=ROUND_UP)
+
+    async def price(self, item: PriceItem, user_id: int | None = None) -> Decimal:
+        # Public overrides and markup are for customers only. Administrators
+        # see and pay the original provider cost, including at checkout.
+        if user_id is not None and user_id in settings.admins:
+            return self.original_price(item)
+        self.original_price(item)  # validate currency conversion for all viewers
         async with Session() as s:
             markup = await s.get(Setting, 'markup_percent')
             override = await s.get(Setting, f'price:{item.service}:{item.country}')
@@ -81,19 +91,20 @@ class Shop:
         custom = Decimal(override.value) if override else None
         return self.price_from_settings(item, percentage, custom)
 
-    async def quote(self, service: str, country: str) -> tuple[PriceItem, Decimal]:
+    async def quote(self, service: str, country: str,
+                    user_id: int | None = None) -> tuple[PriceItem, Decimal]:
         if not settings.service_allowed(service) or not settings.country_allowed(country):
             raise BotError('This selection is not available')
         item = next((i for i in await self.provider.get_prices()
                      if i.service == service and i.country == country), None)
         if not item:
             raise BotError('No numbers in stock for this selection')
-        return item, await self.price(item)
+        return item, await self.price(item, user_id=user_id)
 
     async def buy(self, user_id: int, service: str, country: str) -> Activation:
         if not settings.live_ready:
             raise BotError('Live purchases are disabled until admin setup is complete')
-        item, charge = await self.quote(service, country)
+        item, charge = await self.quote(service, country, user_id=user_id)
         if await self.provider.get_balance() < item.cost:
             raise BotError('Provider balance is insufficient. Please try again later.')
         async with Session.begin() as s:

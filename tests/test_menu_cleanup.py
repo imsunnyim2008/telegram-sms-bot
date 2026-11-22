@@ -43,7 +43,7 @@ def allowed_user(monkeypatch):
 @pytest.mark.asyncio
 async def test_choose_country_sends_confirmation_then_deletes_country_list(monkeypatch, allowed_user):
     class FakeShop:
-        async def quote(self, service, country):
+        async def quote(self, service, country, user_id=None):
             assert (service, country) == ('telegram', '12')
             return PriceItem('telegram', '12', Decimal('0.29'), 100), Decimal('0.4485')
 
@@ -89,7 +89,7 @@ async def test_delete_denied_does_not_resubmit_or_hide_purchased_order(monkeypat
 @pytest.mark.asyncio
 async def test_failed_quote_keeps_country_list(monkeypatch, allowed_user):
     class FakeShop:
-        async def quote(self, service, country):
+        async def quote(self, service, country, user_id=None):
             raise BotError('No numbers available')
 
     monkeypatch.setattr(handlers, 'shop', FakeShop())
