@@ -85,7 +85,18 @@ class Setting(Base):
     value: Mapped[str] = mapped_column(Text)
 
 
-engine = create_async_engine(settings.database_url, pool_pre_ping=True)
+# Render may supply an ordinary PostgreSQL (psycopg) URL, but our
+# dependencies use the asynchronous asyncpg driver. Normalize the dialect.
+def async_database_url(url: str) -> str:
+    prefix, separator, remainder = url.partition('://')
+    if separator and prefix in {
+        'postgres', 'postgresql', 'postgresql+psycopg', 'postgresql+psycopg2'
+    }:
+        return 'postgresql+asyncpg://' + remainder
+    return url
+
+
+engine = create_async_engine(async_database_url(settings.database_url), pool_pre_ping=True)
 Session = async_sessionmaker(engine, expire_on_commit=False)
 
 
