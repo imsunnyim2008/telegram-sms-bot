@@ -206,7 +206,8 @@ class Shop:
             user = await s.get(User, user_id)
             if not user or user.is_banned or not user.accepted_terms:
                 raise BotError('Account unavailable')
-            p = Payment(user_id=user_id, gateway_invoice_id='creating:' + uuid.uuid4().hex,
+            p = Payment(user_id=user_id, gateway=settings.payment_provider,
+                        gateway_invoice_id='creating:' + uuid.uuid4().hex,
                         amount_fiat=amount, amount_credit=amount, status='creating')
             s.add(p)
             await s.flush()
@@ -229,6 +230,8 @@ class Shop:
         return {'invoice_id': invoice_id, 'url': url, 'amount': amount}
 
     async def verify_and_credit(self, invoice_id: str) -> bool:
+        if settings.payment_provider != 'cryptobot':
+            return False
         # Authoritative gateway read, not a client-supplied "paid" flag.
         invoice = await self.gateway.get_invoice(invoice_id)
         if not invoice:
@@ -257,6 +260,56 @@ class Shop:
             await apply(s, row.user_id, row.amount_credit, 'topup', 'payment', str(row.id))
             uid, amount = row.user_id, row.amount_credit
         await self.notifier.send(uid, f'Payment confirmed! +{amount} {settings.wallet_currency} wallet credit.')
+        return True
+
+    async def verify_and_credit_nowpayments(self, invoice_id: str, payment_id: str) -> bool:
+        """Credit only on a finished payment reverified using the gateway API."""
+        if settings.payment_provider != 'nowpayments' or not settings.payment_ready:
+            return False
+        async with Session() as s:
+            row = (await s.execute(select(Payment).where(
+                Payment.gateway == 'nowpayments',
+                Payment.gateway_invoice_id == invoice_id))).scalar_one_or_none()
+            if not row or row.status != 'created':
+                return False
+            expected_order = f'friday-topup-{row.id}'
+            expected_amount = row.amount_fiat
+            expected_currency = settings.wallet_currency.lower()
+        # Signed IPN requests only trigger this authoritative check.
+        remote = await self.gateway.get_payment_status(payment_id)
+        if str(remote.get('payment_id', '')) != payment_id:
+            return False
+        if str(remote.get('invoice_id', '')) != invoice_id:
+            return False
+        if str(remote.get('order_id', '')) != expected_order:
+            return False
+        if remote.get('payment_status') != 'finished':
+            return False
+        if str(remote.get('price_currency', '')).lower() != expected_currency:
+            return False
+        try:
+            price = Decimal(str(remote.get('price_amount', '')))
+            paid = Decimal(str(remote.get('actually_paid', '')))
+            if (not price.is_finite() or price != expected_amount or
+                    not paid.is_finite() or paid <= 0):
+                return False
+        except (ValueError, TypeError, ArithmeticError):
+            return False
+        async with Session.begin() as s:
+            row = (await s.execute(select(Payment).where(
+                Payment.gateway == 'nowpayments',
+                Payment.gateway_invoice_id == invoice_id).with_for_update())).scalar_one_or_none()
+            if not row or row.status != 'created' or row.amount_fiat != price:
+                return False
+            row.status = 'paid'
+            row.paid_at = utcnow()
+            await apply(s, row.user_id, row.amount_credit, 'topup', 'payment', str(row.id))
+            user_id, amount = row.user_id, row.amount_credit
+        try:
+            await self.notifier.send(user_id,
+                f'Payment confirmed! +{amount} {settings.wallet_currency} wallet credit.')
+        except Exception:
+            log.warning('Payment credited, but confirmation message could not be delivered')
         return True
 
     async def alert_admins(self, message: str) -> None:
