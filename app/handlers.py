@@ -146,7 +146,8 @@ async def callbacks(callback: CallbackQuery):
     if data == 'accept':
         await shop.ensure_user(uid, callback.from_user.username or '')
         await shop.accept_terms(uid)
-        await callback.message.answer('Accepted. Welcome!', reply_markup=main_menu_for(uid))
+        await show_selection_menu(callback.message, 'Accepted. Welcome!',
+                                  main_menu_for(uid), edit=True)
         return
     if not await allowed(uid, callback.message):
         return
@@ -188,18 +189,27 @@ async def callbacks(callback: CallbackQuery):
             # Keep the new order receipt; remove the stale confirm-purchase card.
             await remove_previous_menu(callback.message)
         elif data.startswith('check:'):
-            await check_sms(callback.message, uid, int(data.split(':')[1]))
+            await check_sms(callback.message, uid, int(data.split(':')[1]), edit=True)
         elif data.startswith('cancel:'):
             await shop.cancel(uid, int(data.split(':')[1]))
-            await callback.message.answer('Cancellation submitted. Check /orders for current status.')
+            await show_selection_menu(
+                callback.message, 'Cancellation submitted. Check /orders for current status.',
+                keyboard([[('⬅️ Main menu', 'menu:home')]]), edit=True,
+            )
         elif data == 'balance':
-            await show_balance(callback.message, uid)
+            await show_balance(callback.message, uid, edit=True)
         elif data == 'topup':
-            await prompt_topup(callback.message, uid)
+            await prompt_topup(callback.message, uid, edit=True)
         elif data == 'orders':
-            await show_orders(callback.message, uid)
+            await show_orders(callback.message, uid, edit=True)
         elif data == 'help':
-            await callback.message.answer(PUBLIC_HELP, reply_markup=main_menu_for(uid))
+            await show_selection_menu(callback.message, PUBLIC_HELP,
+                                      main_menu_for(uid), edit=True)
+        elif data == 'menu:home':
+            # Leaving a price/top-up wizard must not leave a pending amount input.
+            await clear_flow(uid)
+            await show_selection_menu(callback.message, 'Welcome! Choose an option:',
+                                      main_menu_for(uid), edit=True)
         elif data.startswith('ps:'):
             if uid not in settings.admins or callback.message.chat.type != 'private':
                 await callback.message.answer('Admin only')
@@ -214,13 +224,15 @@ async def callbacks(callback: CallbackQuery):
                     await admin_price_prompt(callback.message, uid, parts[2], parts[3])
                     await remove_previous_menu(callback.message)
                 elif parts[1] == 'reset' and len(parts) == 4:
-                    await admin_price_reset(callback.message, parts[2], parts[3])
+                    await admin_price_reset(callback.message, parts[2], parts[3],
+                                            edit=True)
                 else:
                     await callback.message.answer('Invalid selection. Use /setprice.')
         elif data == 'clear:confirm':
             await clear_chat_confirm(callback.message, uid)
         elif data == 'clear:cancel':
-            await remove_previous_menu(callback.message)
+            await show_selection_menu(callback.message, 'Welcome! Choose an option:',
+                                      main_menu_for(uid), edit=True)
         elif data == 'admin:settings':
             if uid not in settings.admins:
                 await callback.message.answer('Admin only')
@@ -429,14 +441,19 @@ async def admin_price_prompt(target, uid: int, service: str, country: str):
     )
 
 
-async def admin_price_reset(target, service: str, country: str):
+async def admin_price_reset(target, service: str, country: str, *, edit: bool = False):
     if not settings.service_allowed(service) or not settings.country_allowed(country):
         raise BotError('Invalid price selection')
     async with Session.begin() as s:
         row = await s.get(Setting, f'price:{service}:{country}')
         if row:
             await s.delete(row)
-    await target.answer('✅ Custom public price reset. Global markup will apply to new purchases.')
+    await show_selection_menu(
+        target, '✅ Custom public price reset. Global markup will apply to new purchases.',
+        keyboard([[('💵 Change another price', 'ps:services:0')],
+                  [('⬅️ Admin Settings', 'admin:settings')]]),
+        edit=edit,
+    )
 
 
 async def admin_price_save(target, uid: int, flow: dict, raw: str):
@@ -477,26 +494,28 @@ async def admin_price_save(target, uid: int, flow: dict, raw: str):
     )
 
 
-async def show_balance(target, uid):
+async def show_balance(target, uid, *, edit: bool = False):
     user = await shop.get_user(uid)
-    await target.answer(f'Your balance: {user.balance} {settings.wallet_currency}',
-                        reply_markup=main_menu_for(uid))
+    await show_selection_menu(
+        target, f'Your balance: {user.balance} {settings.wallet_currency}',
+        main_menu_for(uid), edit=edit,
+    )
 
 
-async def show_orders(target, uid):
+async def show_orders(target, uid, *, edit: bool = False):
     async with Session() as s:
         orders = (await s.scalars(select(Activation).where(Activation.user_id == uid)
                                   .order_by(Activation.id.desc()).limit(10))).all()
-    if not orders:
-        await target.answer('No orders yet.')
-        return
     lines = []
     for row in orders:
         number = row.phone if row.status in ('pending', 'ordering', 'received') else (
             '••••' + row.phone[-4:] if row.phone else 'hidden')
         lines.append(f'#{row.id} {row.service} / {row.country}: {row.status} • {number} • '
                      f'{row.price_charged} {settings.wallet_currency} • /check {row.id}')
-    await target.answer('\n'.join(lines))
+    await show_selection_menu(
+        target, '\n'.join(lines) if lines else 'No orders yet.',
+        keyboard([[('⬅️ Main menu', 'menu:home')]]), edit=edit,
+    )
 
 
 @router.message(Command('pricing', 'prices', 'setprice', 'changeprice', ignore_case=True))
@@ -603,15 +622,18 @@ async def send_topup_invoice(target, uid: int, raw: str) -> bool:
     return True
 
 
-async def prompt_topup(target, uid: int):
+async def prompt_topup(target, uid: int, *, edit: bool = False):
     if hasattr(target, 'chat') and target.chat.type != 'private':
         return await target.answer('Open Friday in a private chat to top up.')
     await save_flow(uid, {'type': 'topup'})
-    await target.answer(
+    await show_selection_menu(
+        target,
         f'💳 Enter the amount you want to top up (USD).\n'
         f'✅ Minimum deposit: ${settings.min_topup}\n'
         f'❌ Amounts below ${settings.min_topup} will be rejected.\n\n'
-        'Type an amount such as 5, 10, or 20 and send it.'
+        'Type an amount such as 5, 10, or 20 and send it.',
+        keyboard([[('⬅️ Cancel / Main menu', 'menu:home')]]),
+        edit=edit,
     )
 
 
