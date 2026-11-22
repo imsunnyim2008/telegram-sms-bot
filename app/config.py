@@ -25,7 +25,7 @@ class Config(BaseSettings):
     payment_test_admin_only: bool = True
     payment_base_url: str = 'https://pay.crypt.bot/api'
     markup_percent: Decimal = Decimal('50')
-    min_topup: Decimal = Decimal('2')
+    min_topup: Decimal = Decimal('5')
     max_topup: Decimal = Decimal('500')
     activation_timeout_seconds: int = 900
     provider_low_balance_alert: Decimal = Decimal('10')
