@@ -174,3 +174,110 @@ def test_signature_can_verify_exact_signed_body(monkeypatch):
     raw = b'{"payment_id":123,"invoice_id":234}'
     signature = hmac.new(b'mock-ipn', raw, hashlib.sha512).hexdigest()
     assert NowPayments.verify_webhook(raw, signature)
+
+
+@pytest.mark.asyncio
+async def test_hosted_invoice_null_invoice_id_can_credit_safely(monkeypatch):
+    """NOWPayments webhook can have invoice_id=null even for paid invoices."""
+    import app.business as business
+    engine = create_async_engine('sqlite+aiosqlite:///:memory:')
+    async with engine.begin() as conn:
+        await conn.run_sync(Base.metadata.create_all)
+    sess = async_sessionmaker(engine, expire_on_commit=False)
+    monkeypatch.setattr(business, 'Session', sess)
+    monkeypatch.setattr(settings, 'payment_provider', 'nowpayments')
+    monkeypatch.setattr(settings, 'payments_enabled', True)
+    monkeypatch.setattr(settings, 'nowpayments_api_key', 'mock-key')
+    monkeypatch.setattr(settings, 'nowpayments_ipn_secret', 'mock-ipn')
+    monkeypatch.setattr(settings, 'public_base_url', 'https://bot.example.com')
+    async with sess.begin() as s:
+        s.add(User(id=999, balance=Decimal('0'), accepted_terms=True))
+        s.add(Payment(id=99, user_id=999, gateway='nowpayments',
+                      gateway_invoice_id='111', status='created',
+                      amount_fiat=Decimal('5'), amount_credit=Decimal('5')))
+    class Gateway:
+        async def get_payment_status(self, payment_id):
+            assert payment_id == '333'
+            return {'payment_id': 333, 'invoice_id': None,
+                    'order_id': 'friday-topup-99', 'price_amount': 5,
+                    'price_currency': 'usd', 'actually_paid': '4.99',
+                    'payment_status': 'finished'}
+    class Notifier:
+        def __init__(self): self.sent = []
+        async def send(self, user_id, message): self.sent.append(user_id)
+    notifier = Notifier()
+    shop = Shop(None, Gateway(), notifier)
+    assert await shop.verify_and_credit_nowpayments(
+        None, '333', order_id='friday-topup-99')
+    assert not await shop.verify_and_credit_nowpayments(
+        None, '333', order_id='friday-topup-99')
+    async with sess() as s:
+        user = await s.get(User, 999)
+        entries = (await s.scalars(select(LedgerEntry))).all()
+        assert user.balance == Decimal('5')
+        assert len(entries) == 1
+    assert notifier.sent == [999]
+    await engine.dispose()
+
+
+@pytest.mark.asyncio
+async def test_wrong_remote_invoice_id_must_never_credit(monkeypatch):
+    import app.business as business
+    engine = create_async_engine('sqlite+aiosqlite:///:memory:')
+    async with engine.begin() as conn:
+        await conn.run_sync(Base.metadata.create_all)
+    sess = async_sessionmaker(engine, expire_on_commit=False)
+    monkeypatch.setattr(business, 'Session', sess)
+    monkeypatch.setattr(settings, 'payment_provider', 'nowpayments')
+    monkeypatch.setattr(settings, 'payments_enabled', True)
+    monkeypatch.setattr(settings, 'nowpayments_api_key', 'mock-key')
+    monkeypatch.setattr(settings, 'nowpayments_ipn_secret', 'mock-ipn')
+    monkeypatch.setattr(settings, 'public_base_url', 'https://bot.example.com')
+    async with sess.begin() as s:
+        s.add(User(id=999, balance=Decimal('0'), accepted_terms=True))
+        s.add(Payment(id=99, user_id=999, gateway='nowpayments',
+                      gateway_invoice_id='111', status='created',
+                      amount_fiat=Decimal('5'), amount_credit=Decimal('5')))
+    class Gateway:
+        async def get_payment_status(self, payment_id):
+            return {'payment_id': 333, 'invoice_id': 222,
+                    'order_id': 'friday-topup-99', 'price_amount': 5,
+                    'price_currency': 'usd', 'actually_paid': 5,
+                    'payment_status': 'finished'}
+    class Notifier:
+        async def send(self, *_): raise AssertionError('No credit notification')
+    shop = Shop(None, Gateway(), Notifier())
+    assert not await shop.verify_and_credit_nowpayments(None, '333',
+                                                        order_id='friday-topup-99')
+    async with sess() as s:
+        assert (await s.get(User, 999)).balance == Decimal('0')
+    await engine.dispose()
+
+
+@pytest.mark.asyncio
+async def test_ipn_webhook_accepts_signed_event_without_invoice_id(monkeypatch):
+    """Webhooks containing a valid signed order_id are processed asynchronously."""
+    import app.main as main
+    monkeypatch.setattr(settings, 'payment_provider', 'nowpayments')
+    monkeypatch.setattr(settings, 'payments_enabled', True)
+    monkeypatch.setattr(settings, 'nowpayments_api_key', 'mock-key')
+    monkeypatch.setattr(settings, 'nowpayments_ipn_secret', 'mock-ipn')
+    monkeypatch.setattr(settings, 'public_base_url', 'https://bot.example.com')
+    calls = []
+    async def processor(order_id, invoice_id, payment_id):
+        calls.append((order_id, invoice_id, payment_id))
+    monkeypatch.setattr(main, 'process_nowpayments_payment', processor)
+    event = {'payment_id': 333, 'invoice_id': None, 'order_id': 'friday-topup-99',
+             'payment_status': 'finished'}
+    raw = json.dumps(event).encode()
+    sorted_payload = json.dumps(event, sort_keys=True, separators=(',', ':')).encode()
+    signature = hmac.new(b'mock-ipn', sorted_payload, hashlib.sha512).hexdigest()
+    async with httpx.AsyncClient(transport=httpx.ASGITransport(app=main.web),
+                                 base_url='https://bot.example.com') as client:
+        response = await client.post('/webhook/nowpayments', content=raw,
+                headers={'x-nowpayments-sig':signature,'content-type':'application/json'})
+        assert response.status_code == 200
+        assert calls == [('friday-topup-99', None, '333')]
+        invalid = await client.post('/webhook/nowpayments', content=raw,
+                headers={'x-nowpayments-sig':'invalid','content-type':'application/json'})
+        assert invalid.status_code == 401

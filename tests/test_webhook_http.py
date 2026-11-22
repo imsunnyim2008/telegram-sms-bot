@@ -93,7 +93,7 @@ async def test_webhook_route_processes_finished_only(monkeypatch):
         r = await client.post('/webhook/nowpayments', json=finished,
                               headers={'x-nowpayments-sig': signature_for(finished)})
         assert r.status_code == 200
-    assert called == [('123', '456')]
+    assert called == [(None, '123', '456')]
 
 
 @pytest.mark.asyncio

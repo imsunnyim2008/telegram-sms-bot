@@ -262,26 +262,61 @@ class Shop:
         await self.notifier.send(uid, f'Payment confirmed! +{amount} {settings.wallet_currency} wallet credit.')
         return True
 
-    async def verify_and_credit_nowpayments(self, invoice_id: str, payment_id: str) -> bool:
-        """Credit only on a finished payment reverified using the gateway API."""
+    async def verify_and_credit_nowpayments(self, invoice_id: str | None,
+                                            payment_id: str,
+                                            *, order_id: str | None = None) -> bool:
+        """Validate a NOWPayments hosted checkout and credit once.
+
+        Hosted invoices can send invoice_id=null in their IPNs. Only a
+        signed provider event can trigger this method; the order reference
+        must still match both the local invoice and authenticated remote
+        payment details. No wallet credit from an unverified callback.
+        """
         if settings.payment_provider != 'nowpayments' or not settings.payment_ready:
             return False
+        if not payment_id.isascii() or not payment_id.isdigit() or len(payment_id) > 40:
+            return False
+        if invoice_id is not None and (
+            not invoice_id.isascii() or not invoice_id.isdigit() or len(invoice_id) > 40
+        ):
+            return False
+        local_id = None
+        prefix = 'friday-topup-'
+        if order_id is not None:
+            suffix = order_id.removeprefix(prefix)
+            if (not order_id.startswith(prefix) or not suffix.isascii() or
+                    not suffix.isdigit() or len(suffix) > 30):
+                return False
+            local_id = int(suffix)
         async with Session() as s:
-            row = (await s.execute(select(Payment).where(
-                Payment.gateway == 'nowpayments',
-                Payment.gateway_invoice_id == invoice_id))).scalar_one_or_none()
-            if not row or row.status != 'created':
+            if local_id is not None:
+                row = await s.get(Payment, local_id)
+            elif invoice_id is not None:
+                row = (await s.execute(select(Payment).where(
+                    Payment.gateway == 'nowpayments',
+                    Payment.gateway_invoice_id == invoice_id))).scalar_one_or_none()
+            else:
+                return False
+            if not row or row.gateway != 'nowpayments' or row.status != 'created':
+                return False
+            if invoice_id is not None and row.gateway_invoice_id != invoice_id:
                 return False
             expected_order = f'friday-topup-{row.id}'
+            expected_invoice_id = row.gateway_invoice_id
             expected_amount = row.amount_fiat
             expected_currency = settings.wallet_currency.lower()
-        # Signed IPN requests only trigger this authoritative check.
+            local_id = row.id
+
+        # Authenticated server-to-server read, independent of IPN claims.
         remote = await self.gateway.get_payment_status(payment_id)
         if str(remote.get('payment_id', '')) != payment_id:
             return False
-        if str(remote.get('invoice_id', '')) != invoice_id:
-            return False
         if str(remote.get('order_id', '')) != expected_order:
+            return False
+        remote_invoice = remote.get('invoice_id')
+        # Older NOWPayments hosted invoice flows can return invoice_id=null.
+        # Reject any *present* provider invoice ID that does not match ours.
+        if remote_invoice is not None and str(remote_invoice) != expected_invoice_id:
             return False
         if remote.get('payment_status') != 'finished':
             return False
@@ -295,15 +330,19 @@ class Shop:
                 return False
         except (ValueError, TypeError, ArithmeticError):
             return False
+
+        # PostgreSQL row locking and unique ledger refs make repeated events
+        # idempotent even if multiple signed IPNs arrive simultaneously.
         async with Session.begin() as s:
-            row = (await s.execute(select(Payment).where(
-                Payment.gateway == 'nowpayments',
-                Payment.gateway_invoice_id == invoice_id).with_for_update())).scalar_one_or_none()
-            if not row or row.status != 'created' or row.amount_fiat != price:
+            row = await s.get(Payment, local_id, with_for_update=True)
+            if (not row or row.gateway != 'nowpayments' or row.status != 'created'
+                    or row.gateway_invoice_id != expected_invoice_id
+                    or row.amount_fiat != price):
                 return False
             row.status = 'paid'
             row.paid_at = utcnow()
-            await apply(s, row.user_id, row.amount_credit, 'topup', 'payment', str(row.id))
+            await apply(s, row.user_id, row.amount_credit,
+                        'topup', 'payment', str(row.id))
             user_id, amount = row.user_id, row.amount_credit
         try:
             await self.notifier.send(user_id,
