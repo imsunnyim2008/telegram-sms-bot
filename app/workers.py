@@ -10,6 +10,7 @@ from .config import settings
 from .db import Activation, Payment, Session, Setting, utcnow
 from .provider import ProviderError
 from .service_ui import app_label_html
+from .textverified_webhooks import prune_old_receipts
 
 log = logging.getLogger(__name__)
 
@@ -180,6 +181,7 @@ class Worker:
             for row in rows:
                 row.code = None
                 row.phone = None
+        await prune_old_receipts()
 
     async def low_balance_alert(self):
         if not settings.provider_credentials_ready:
