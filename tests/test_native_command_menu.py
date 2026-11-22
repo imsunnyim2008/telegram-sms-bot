@@ -116,6 +116,7 @@ async def test_admin_panel_shows_commands_only_for_owner(monkeypatch):
 @pytest.mark.asyncio
 async def test_admin_callback_cannot_show_settings_to_other_users(monkeypatch):
     monkeypatch.setattr(settings, 'admins', {42}, raising=False)
+    monkeypatch.setattr(settings, 'public_base_url', 'https://friday.example.com')
     async def allow(uid, target):
         return True
     monkeypatch.setattr(handlers, 'allowed', allow)
