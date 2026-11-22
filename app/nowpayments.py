@@ -113,6 +113,10 @@ class NowPayments:
             deep = canonical_json(obj)
             flat = dict(sorted(obj.items()))
             candidates = [
+                # EXACTLY NOWPayments' official Python documentation:
+                # json.dumps(message, separators=(',', ':'), sort_keys=True)
+                # Note: default ensure_ascii=True differs from JS/PHP samples.
+                json.dumps(obj, separators=(',', ':'), sort_keys=True).encode('utf-8'),
                 json.dumps(deep, separators=(",", ":"),
                            ensure_ascii=False).encode("utf-8"),
                 json.dumps(flat, separators=(",", ":"),
