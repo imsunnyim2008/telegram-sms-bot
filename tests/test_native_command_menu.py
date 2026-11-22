@@ -128,7 +128,7 @@ async def test_admin_callback_cannot_show_settings_to_other_users(monkeypatch):
     await handlers.callbacks(FakeCallback(42, admin, 'admin:settings'))
     assert len(admin.edits) == 1
     assert 'Admin Settings' in admin.edits[0][0]
-    assert 'set a public selling price' in admin.edits[0][0]
+    assert 'Set a public selling price' in admin.edits[0][0]
     assert 'Change Public Prices' in admin.edits[0][1]['reply_markup'].inline_keyboard[0][0].text
     assert '/stats' in admin.edits[0][0]
     assert 'admin:home' == admin.edits[0][1]['reply_markup'].inline_keyboard[-1][0].callback_data
