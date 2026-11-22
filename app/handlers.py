@@ -150,6 +150,7 @@ async def countries(target, service: str, page: int = 0):
         raise BotError('Service disabled')
     items = [x for x in await shop.provider.get_prices() if x.service == service]
     items.sort(key=lambda i: i.cost)
+    country_names = await shop.provider.get_country_names() if hasattr(shop.provider, 'get_country_names') else {}
     page = max(0, min(page, max(0, (len(items) - 1) // 8)))
     chunk = items[page * 8:(page + 1) * 8]
     rows = []
@@ -158,7 +159,8 @@ async def countries(target, service: str, page: int = 0):
             price = f'{await shop.price(x)} {settings.wallet_currency}'
         else:
             price = 'price setup required'
-        rows.append([(f'{x.country.title()} • {price} • {x.stock} left',
+        display_country = country_names.get(x.country, f'Country #{x.country}')
+        rows.append([(f'{display_country} • {price} • {x.stock} left',
                       f'preview:{service}:{x.country}')])
     nav = []
     if page:
