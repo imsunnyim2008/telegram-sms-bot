@@ -1,6 +1,5 @@
 """Offline integration checks for Grizzly's published handler API protocol."""
 from decimal import Decimal
-import json
 
 import httpx
 import pytest
