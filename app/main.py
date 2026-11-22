@@ -11,6 +11,7 @@ from .business import Shop
 from .config import settings
 from .db import engine, init_db
 from .gateway import CryptoBot
+from .nowpayments import NowPayments
 from .handlers import router, set_shop
 from .provider import FiveSim
 from .grizzly import GrizzlySms
@@ -42,7 +43,7 @@ async def lifespan(app: FastAPI):
     if settings.live_purchases_enabled and not settings.live_ready:
         raise RuntimeError('Live buys require PROVIDER_API_KEY and a confirmed price conversion factor')
     if settings.payments_enabled and not settings.payment_ready:
-        raise RuntimeError('Enabled payments require PAYMENT_API_KEY')
+        raise RuntimeError('Enabled payments require valid gateway API key, IPN secret and PUBLIC_BASE_URL')
     if (settings.live_purchases_enabled or settings.payments_enabled) and settings.database_url.startswith('sqlite'):
         raise RuntimeError('Use PostgreSQL before enabling money movement')
     await init_db()
@@ -53,7 +54,7 @@ async def lifespan(app: FastAPI):
         await bot.session.close()
         raise
     provider = GrizzlySms() if settings.provider_name == 'grizzly' else FiveSim()
-    gateway = CryptoBot()
+    gateway = NowPayments() if settings.payment_provider == 'nowpayments' else CryptoBot()
     shop = Shop(provider, gateway, TelegramNotifier(bot))
     set_shop(shop)
     dp = Dispatcher()
@@ -98,8 +99,8 @@ async def process_payment(invoice_id: str):
 
 @web.post('/webhook/cryptobot')
 async def cryptobot_webhook(request: Request, background: BackgroundTasks):
-    if not settings.payment_ready:
-        raise HTTPException(status_code=503, detail='Payments disabled')
+    if settings.payment_provider != 'cryptobot' or not settings.payment_ready:
+        raise HTTPException(status_code=503, detail='Crypto Bot payments disabled')
     raw = await request.body()
     if len(raw) > 65536:
         raise HTTPException(status_code=413, detail='Payload too large')
@@ -116,4 +117,38 @@ async def cryptobot_webhook(request: Request, background: BackgroundTasks):
     except (ValueError, KeyError, TypeError, AttributeError):
         raise HTTPException(status_code=400, detail='Malformed payment event')
     background.add_task(process_payment, invoice_id)
+    return {'ok': True}
+
+
+async def process_nowpayments_payment(invoice_id: str, payment_id: str):
+    try:
+        await runtime['shop'].verify_and_credit_nowpayments(invoice_id, payment_id)
+    except Exception:
+        # Never log API credentials, signed payloads, or private wallet data.
+        log.exception('NOWPayments payment verification task failed')
+
+
+@web.post('/webhook/nowpayments')
+async def nowpayments_webhook(request: Request, background: BackgroundTasks):
+    if settings.payment_provider != 'nowpayments' or not settings.payment_ready:
+        raise HTTPException(status_code=503, detail='NOWPayments disabled')
+    raw = await request.body()
+    if len(raw) > 65536:
+        raise HTTPException(status_code=413, detail='Payload too large')
+    signature = request.headers.get('x-nowpayments-sig', '')
+    if not NowPayments.verify_webhook(raw, signature):
+        raise HTTPException(status_code=401, detail='Invalid signature')
+    try:
+        event = json.loads(raw)
+        if not isinstance(event, dict):
+            raise ValueError()
+        invoice_id = str(event['invoice_id'])
+        payment_id = str(event['payment_id'])
+        if not (invoice_id.isascii() and invoice_id.isdigit() and len(invoice_id) <= 40
+                and payment_id.isascii() and payment_id.isdigit() and len(payment_id) <= 40):
+            raise ValueError()
+    except (ValueError, TypeError, KeyError):
+        raise HTTPException(status_code=400, detail='Malformed IPN event')
+    if event.get('payment_status') == 'finished':
+        background.add_task(process_nowpayments_payment, invoice_id, payment_id)
     return {'ok': True}
