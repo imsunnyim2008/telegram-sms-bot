@@ -183,4 +183,4 @@ class Worker:
                 entry.value = today
             else:
                 s.add(Setting(key='low_balance_alert_day', value=today))
-        await self.shop.alert_admins('Low provider balance; top up your 5SIM wallet.')
+        await self.shop.alert_admins(f'Low provider balance; top up your {settings.provider_name} wallet.')
