@@ -8,6 +8,7 @@ from sqlalchemy import select
 from .config import settings
 from .db import Activation, Payment, Session, Setting, utcnow
 from .provider import ProviderError
+from .service_ui import app_label
 
 log = logging.getLogger(__name__)
 
@@ -58,6 +59,7 @@ class Worker:
                 return
             status, oid, user_id, expires = row.status, row.provider_order_id, row.user_id, aware(row.expires_at)
             created, notified, code = aware(row.created_at), row.sms_notified, row.code
+            service = row.service
         if status == 'manual_review':
             await self.shop.reconcile(aid)
             async with Session.begin() as s:
@@ -66,7 +68,7 @@ class Worker:
                     row.next_poll_at = utcnow() + timedelta(seconds=60)
             return
         if status == 'received':
-            await self.deliver_and_finish(aid, user_id, oid, code, notified)
+            await self.deliver_and_finish(aid, user_id, oid, code, notified, service)
             return
         if status != 'pending' or oid is None:
             return
@@ -85,7 +87,7 @@ class Worker:
                     row.code = received_code[:100]
                     row.status = 'received'
                     row.next_poll_at = utcnow()
-            await self.deliver_and_finish(aid, user_id, oid, received_code, False)
+            await self.deliver_and_finish(aid, user_id, oid, received_code, False, service)
             return
         if provider_status in {'CANCELED', 'CANCELLED', 'EXPIRED', 'TIMEOUT', 'BANNED'}:
             outcome = 'expired' if provider_status in {'EXPIRED', 'TIMEOUT'} else 'cancelled'
@@ -108,10 +110,14 @@ class Worker:
                 if row and row.status == 'pending':
                     row.next_poll_at = utcnow() + timedelta(seconds=interval)
 
-    async def deliver_and_finish(self, aid, user_id, oid, code, notified):
+    async def deliver_and_finish(self, aid, user_id, oid, code, notified, service=''):
         if not notified:
             try:
-                await self.shop.notifier.send(user_id, f'🔐 Your verification code for order #{aid}: {code}')
+                await self.shop.notifier.send(
+                    user_id,
+                    f'🔐 Your verification code for order #{aid}: {code}\n'
+                    f'App: {app_label(service)}',
+                )
             except Exception:
                 # Keep received state so we can retry notification after a restart.
                 return
