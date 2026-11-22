@@ -810,6 +810,10 @@ async def admin_setupcheck(message: Message):
             lines.append(f'{settings.provider_name.title()} API: connected (provider balance {balance} raw units)')
         except Exception:
             lines.append(f'{settings.provider_name.title()} API: connection or authorization failed')
+    if settings.provider_name == 'textverified':
+        lines.append('TextVerified SMS webhook: ' +
+                     ('configured' if settings.textverified_webhook_secret else
+                      'NOT CONFIGURED (SMS polling still works)'))
     if settings.payment_provider == 'nowpayments':
         if not settings.nowpayments_api_key:
             lines.append('NOWPayments API: key missing')
