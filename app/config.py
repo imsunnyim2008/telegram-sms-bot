@@ -22,6 +22,7 @@ class Config(BaseSettings):
     nowpayments_api_base: str = 'https://api.nowpayments.io/v1'
     public_base_url: str = ''
     payments_enabled: bool = False
+    payment_test_admin_only: bool = True
     payment_base_url: str = 'https://pay.crypt.bot/api'
     markup_percent: Decimal = Decimal('50')
     min_topup: Decimal = Decimal('2')
