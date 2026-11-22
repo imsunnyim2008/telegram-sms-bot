@@ -50,7 +50,7 @@ ADMIN_HELP = (
     '/unban USER_ID — Remove a restriction\n\n'
     '📣 Operations\n'
     '/broadcast MESSAGE — Message customers\n'
-    '/resolve ORDER_ID OUTCOME — Resolve a reviewed SMS order\n'
+    '/resolve ORDER_ID refund — Resolve a reviewed SMS order\n'
     '/reconcilepayment PAYMENT_ID — Verify and recover a finished payment\n\n'
     '🔒 These commands are restricted to the bot administrator and are '
     'deliberately hidden from the public Menu button. '
@@ -59,22 +59,28 @@ ADMIN_HELP = (
 
 
 async def register_native_menu(bot, admin_ids: set[int]):
-    """Create native Telegram command list and explicit blue Menu button.
+    """Create the Telegram Menu button and publish only customer commands.
 
-    Reapply on restart because BotFather or old command scopes may be stale.
-    Never register admin-only commands in any public Telegram command scope.
+    Register the default and all-private scopes, plus explicit admin-private
+    overrides, so no stale admin command list leaks into a native menu.
+    An unreachable admin chat must not prevent registration for everyone.
     """
     try:
         await bot.set_my_commands(PUBLIC_COMMANDS, scope=BotCommandScopeDefault())
         await bot.set_my_commands(PUBLIC_COMMANDS, scope=BotCommandScopeAllPrivateChats())
-        for uid in sorted(admin_ids):
-            # Override a possible older admin chat-scoped menu with PUBLIC commands.
-            await bot.set_my_commands(PUBLIC_COMMANDS, scope=BotCommandScopeChat(chat_id=uid))
         await bot.set_chat_menu_button(menu_button=MenuButtonCommands())
-        log.info('Telegram native Menu registered with %d public commands', len(PUBLIC_COMMANDS))
-        return True
     except Exception as exc:
-        # A menu registration failure must never stop an active payment/SMS bot.
-        # Do not log sensitive Bot API request URLs or tokens.
-        log.warning('Telegram native Menu registration failed: %s', type(exc).__name__)
+        # No bot token, request URL or raw API payload in logs.
+        log.warning('Telegram public Menu setup failed: %s', type(exc).__name__)
         return False
+
+    for uid in sorted(admin_ids):
+        try:
+            # Admin commands are accessible inside Admin Settings, not through
+            # Telegram's public Menu—even to the administrator.
+            await bot.set_my_commands(PUBLIC_COMMANDS, scope=BotCommandScopeChat(chat_id=uid))
+        except Exception as exc:
+            log.warning('Telegram admin chat command scope unavailable: %s', type(exc).__name__)
+
+    log.info('Telegram Menu registered with %d public commands', len(PUBLIC_COMMANDS))
+    return True
