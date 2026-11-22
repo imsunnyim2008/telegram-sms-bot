@@ -16,6 +16,7 @@ from .country_ui import arrange_country_offers, country_flag
 from .command_menu import PUBLIC_HELP, ADMIN_HELP
 from .db import Activation, Session, Setting, User
 from .ledger import InsufficientFunds, apply
+from .service_ui import app_label
 
 router = Router()
 shop = None  # assigned by app.main on startup
@@ -255,7 +256,7 @@ async def callbacks(callback: CallbackQuery):
             _, service, country = data.split(':')
             order = await shop.buy(uid, service, country)
             await callback.message.answer(
-                f'✅ Order #{order.id}\nNumber: {order.phone}\n'
+                f'✅ Order #{order.id}\nApp: {app_label(service)}\nNumber: {order.phone}\n'
                 f'Expires in up to {settings.activation_timeout_seconds // 60} minutes.\n'
                 'Send an SMS to this number from your authorized account. '
                 'Tap Check SMS if the message does not arrive automatically.',
@@ -591,7 +592,8 @@ async def show_orders(target, uid, *, edit: bool = False):
     for row in orders:
         number = row.phone if row.status in ('pending', 'ordering', 'received') else (
             '••••' + row.phone[-4:] if row.phone else 'hidden')
-        lines.append(f'#{row.id} {row.service} / {row.country}: {row.status} • {number} • '
+        lines.append(f'#{row.id} • App: {app_label(row.service)} / {row.country}\n'
+                     f'{row.status} • {number} • '
                      f'{row.price_charged} {settings.wallet_currency} • /check {row.id}')
     await show_selection_menu(
         target, '\n'.join(lines) if lines else 'No orders yet.',
@@ -645,13 +647,15 @@ async def check_sms(target, user_id: int, activation_id: int, *, edit: bool = Fa
             return
         status = row.status
         phone = row.phone
+        service = row.service
     if status in ('pending', 'received'):
         from .workers import Worker
         try:
             await Worker(shop).poll_order(activation_id)
         except Exception:
             await respond(
-                f'Order #{activation_id} • Number: {phone or "not assigned"}\n'
+                f'Order #{activation_id}\nApp: {app_label(service)}\n'
+                f'Number: {phone or "not assigned"}\n'
                 'Provider status temporarily unavailable. Your order is still saved.',
                 active=True,
             )
@@ -664,12 +668,15 @@ async def check_sms(target, user_id: int, activation_id: int, *, edit: bool = Fa
         status = row.status
         code = row.code
         phone = row.phone
+        service = row.service
     if code and status in ('received', 'completed'):
-        await respond(f'🔐 Code for order #{activation_id}: {code}\nStatus: {status}'
+        await respond(f'🔐 Code for order #{activation_id}: {code}\n'
+                      f'App: {app_label(service)}\nStatus: {status}'
                       + (f'\nNumber: {phone}' if phone else ''))
     elif status == 'pending':
         await respond(
-            f'Order #{activation_id} • Number: {phone or "not assigned"}\n'
+            f'Order #{activation_id}\nApp: {app_label(service)}\n'
+            f'Number: {phone or "not assigned"}\n'
             'Waiting for an SMS at the provider. '
             'If the sender has not sent a code, Friday cannot create one. '
             'Use Check SMS to refresh, or cancel a pending order if unused.',
