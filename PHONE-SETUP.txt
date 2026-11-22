@@ -1,0 +1,9 @@
+TELEGRAM SMS BOT: SET UP USING ONLY YOUR PHONE
+
+1. Telegram → @BotFather → /newbot → give it a name and username. Keep BOT_TOKEN private.
+2. On your iPhone in Safari go to https://github.com/new and create an EMPTY PRIVATE repository called telegram-sms-bot. Tell ChatGPT "repo created"; your connected GitHub integration can then receive these project files without a laptop.
+3. When files are pushed, create a PostgreSQL DB from https://dashboard.render.com and keep its INTERNAL DATABASE URL secret.
+4. Create Render Web Service from that GitHub repo. Python build: pip install -r requirements.txt. Start: uvicorn app.main:web --host 0.0.0.0 --port $PORT . Environment: BOT_TOKEN, ADMIN_IDS (Telegram numeric user ID), DATABASE_URL (internal URL with prefix postgresql+asyncpg://). Leave payments/buying disabled while testing.
+5. Open your Telegram bot, send /start, accept Terms, try /balance and /buy. Live numbers and top-ups need separate provider/payment API keys and verified currency conversion after safe testing.
+
+IMPORTANT: Using a free/sleeping Render web service cannot guarantee SMS delivery on time. Use a continuously running service for live operations. Do NOT paste secret tokens in a chat or GitHub files. The repository and code are not deployed automatically from this ZIP.

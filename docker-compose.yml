@@ -1,0 +1,27 @@
+services:
+  db:
+    image: postgres:15-alpine
+    restart: unless-stopped
+    environment:
+      POSTGRES_USER: smsbot
+      POSTGRES_PASSWORD: localdev_change_me
+      POSTGRES_DB: smsbot
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U smsbot"]
+      interval: 5s
+      retries: 10
+    volumes:
+      - dbdata:/var/lib/postgresql/data
+  bot:
+    build: .
+    restart: unless-stopped
+    env_file: .env
+    environment:
+      DATABASE_URL: postgresql+asyncpg://smsbot:localdev_change_me@db:5432/smsbot
+    ports:
+      - '10000:10000'
+    depends_on:
+      db:
+        condition: service_healthy
+volumes:
+  dbdata:
