@@ -567,7 +567,7 @@ async def admin_price_save(target, uid: int, flow: dict, raw: str):
         target,
         f'PUBLIC PRICE SAVED!\n{service.title()} / Country #{country}: {value} USD\n'
         'Buyers see only your selling price, which is debited from their wallet at purchase.',
-        reply_markup=keyboard([
+        keyboard([
             [('Change Another Price', 'ps:services:0')],
             [('Reset This Price', f'ps:reset:{service}:{country}')],
             [('Admin Settings', 'admin:settings')],
@@ -720,6 +720,8 @@ async def send_topup_invoice(target, uid: int, raw: str) -> bool:
                 url=invoice['url']),
         ]]),
     )
+    # Payment invoice is a record; retire only the stale interactive top-up prompt.
+    await discard_active_menu(target)
     return True
 
 
@@ -1022,14 +1024,15 @@ async def cancel_flow_command(message: Message):
 async def clear_chat_command(message: Message):
     if message.chat.type != 'private':
         return await message.answer('Chat cleanup is available only in a private chat.')
-    await message.answer(
+    await show_selection_menu(
+        message,
         '🧹 Clear Friday chat?\n'
         'This deletes recent Telegram messages from this private chat, '
         'including messages containing verification codes.\n'
         'Telegram bots cannot delete messages older than 48 hours or guarantee '
         'removal of the entire history. Your wallet and orders are NOT deleted.\n'
         'For a complete history wipe, use Telegram > Clear History.',
-        reply_markup=keyboard([
+        keyboard([
             [('🗑️ Yes, clear recent messages', 'clear:confirm')],
             [('Cancel', 'clear:cancel')],
         ]),
