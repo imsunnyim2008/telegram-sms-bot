@@ -13,10 +13,14 @@ from .db import engine, init_db
 from .gateway import CryptoBot
 from .handlers import router, set_shop
 from .provider import FiveSim
+from .grizzly import GrizzlySms
 from .workers import Worker
 
 logging.basicConfig(level=logging.INFO, format='%(asctime)s %(levelname)s %(name)s %(message)s')
 log = logging.getLogger(__name__)
+# Grizzly authenticates with a query parameter; never log full provider URLs.
+logging.getLogger('httpx').setLevel(logging.WARNING)
+logging.getLogger('httpcore').setLevel(logging.WARNING)
 
 
 class TelegramNotifier:
@@ -48,7 +52,7 @@ async def lifespan(app: FastAPI):
     except Exception:
         await bot.session.close()
         raise
-    provider = FiveSim()
+    provider = GrizzlySms() if settings.provider_name == 'grizzly' else FiveSim()
     gateway = CryptoBot()
     shop = Shop(provider, gateway, TelegramNotifier(bot))
     set_shop(shop)
