@@ -238,6 +238,38 @@ def admin_only(message: Message) -> bool:
     return message.from_user.id in settings.admins
 
 
+@router.message(Command('setupcheck'))
+async def admin_setupcheck(message: Message):
+    """Admin-only, non-billing credential check; never return API keys."""
+    if not admin_only(message):
+        return await message.answer('Admin only')
+    lines = ['🔎 SMS Bot production readiness',
+             f'Wallet currency: {settings.wallet_currency}',
+             f'Price conversion configured: {"YES" if settings.provider_price_to_wallet > 0 else "NO"}',
+             f'SMS purchasing enabled: {"YES" if settings.live_purchases_enabled else "NO"}',
+             f'Payment acceptance enabled: {"YES" if settings.payments_enabled else "NO"}']
+    if not settings.provider_api_key:
+        lines.append('5SIM API: key missing')
+    else:
+        try:
+            balance = await shop.provider.get_balance()
+            lines.append(f'5SIM API: connected (provider balance {balance} raw units)')
+        except Exception:
+            lines.append('5SIM API: connection or authorization failed')
+    if not settings.payment_api_key:
+        lines.append('Crypto Pay API: key missing')
+    else:
+        try:
+            await shop.gateway._call('getMe', {})
+            lines.append('Crypto Pay API: connected')
+        except Exception:
+            lines.append('Crypto Pay API: connection or authorization failed')
+    if settings.provider_price_to_wallet <= 0:
+        lines.append('Next: verify the provider price unit and conversion rate independently.')
+    lines.append('This check did not purchase a number or create an invoice.')
+    await message.answer('\n'.join(lines))
+
+
 @router.message(Command('adjust'))
 async def admin_adjust(message: Message):
     if not admin_only(message):
