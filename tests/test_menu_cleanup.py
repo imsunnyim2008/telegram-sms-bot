@@ -66,6 +66,8 @@ async def test_confirm_purchase_sends_order_then_deletes_confirmation(monkeypatc
     await handlers.callbacks(MenuCallback('buy:telegram:12', msg))
     assert [event[0] for event in msg.events] == ['ack', 'send', 'delete']
     assert 'Order #7' in msg.events[1][1]
+    assert 'App: ✈️ Telegram' in msg.events[1][1]
+    assert 'Number: 18176721188' in msg.events[1][1]
     assert 'Check SMS' in msg.events[1][2]['reply_markup'].inline_keyboard[0][0].text
 
 
@@ -97,3 +99,27 @@ async def test_failed_quote_keeps_country_list(monkeypatch, allowed_user):
     await handlers.callbacks(MenuCallback('preview:telegram:12', msg))
     assert [event[0] for event in msg.events] == ['ack', 'send']
     assert 'No numbers available' in msg.events[1][1]
+
+
+@pytest.mark.parametrize('service, expected', [
+    ('whatsapp', '💬 WhatsApp'),
+    ('facebook', '📘 Facebook'),
+    ('instagram', '📸 Instagram'),
+    ('google', '🌐 Google'),
+    ('custom_service', '📱 Custom Service'),
+])
+@pytest.mark.asyncio
+async def test_purchase_receipt_shows_correct_app_for_every_service(
+        monkeypatch, allowed_user, service, expected):
+    class FakeShop:
+        async def buy(self, uid, chosen_service, country):
+            assert (uid, chosen_service, country) == (77, service, '12')
+            return SimpleNamespace(id=44, phone='15551110000')
+
+    monkeypatch.setattr(handlers, 'shop', FakeShop())
+    msg = MenuMessage()
+    await handlers.callbacks(MenuCallback(f'buy:{service}:12', msg))
+    assert [event[0] for event in msg.events] == ['ack', 'send', 'delete']
+    body = msg.events[1][1]
+    assert f'App: {expected}' in body
+    assert 'Number: 15551110000' in body
