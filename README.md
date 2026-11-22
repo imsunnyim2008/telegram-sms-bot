@@ -1,5 +1,44 @@
 # Telegram Virtual Number SMS Bot — Phone-Friendly V1
 
+## Grizzly SMS integration (November 2026)
+
+**Provider changed from 5SIM to Grizzly SMS.** The default backend is now
+PROVIDER_NAME=grizzly; PROVIDER_NAME=fivesim retains the old backend.
+Grizzly uses api.grizzlysms.com/stubs/handler_api.php and these actions:
+getPrices, getBalance, getNumberV2, getStatus and setStatus.
+The Grizzly API key is a query parameter; the app suppresses HTTP client URL logging.
+
+**iPhone activation:** In Render → telegram-sms-bot → Environment, add:
+
+    PROVIDER_NAME=grizzly
+    PROVIDER_API_KEY=<your private Grizzly API key>
+
+Do not share your token in chat or commit it to GitHub. After deployment
+send /setupcheck to the Telegram bot as its admin. This checks the provider
+balance without buying a number. Browse /buy for live prices and stock.
+
+**Real money remains disabled for testing:**
+
+    LIVE_PURCHASES_ENABLED=false
+    PAYMENTS_ENABLED=false
+    PROVIDER_PRICE_TO_WALLET=0
+
+The Grizzly purchase response may include numeric currency code 643 (RUB).
+Do not assume raw provider prices equal USD; establish a verified currency
+conversion before setting the price factor or accepting customer money.
+
+Payment is a separate integration with Crypto Pay and PAYMENT_API_KEY.
+Never reuse your BotFather token for payments. Sandbox-test payment callbacks.
+
+Grizzly getNumberV2 purchases are never blindly retried on network errors.
+Ambiguous orders enter manual review. Grizzly getActiveActivations is not a
+complete purchase history, so this app avoids automatic refunds based only
+on a missing active order. Public use requires controlled tests, operator
+reconciliation procedures and an always-on host.
+
+Docs: https://grizzlysms.com/docs/activation-api-request-a-number-v2
+
+
 A Telegram bot using **aiogram 3**, **5SIM**, **Crypto Bot invoices**, **SQLAlchemy/Postgres**, and a FastAPI webhook. Built from the supplied 8-page blueprint. For **authorized SMS receiving only**. It does **not** bypass the third-party site's security rules. Provider, pricing, and payment account setup are required for live transactions.
 
 ## What works
