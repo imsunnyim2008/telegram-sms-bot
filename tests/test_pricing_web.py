@@ -1,4 +1,5 @@
 """Live price manager: Telegram HMAC admin auth, persistent settings and price floors."""
+import base64
 import hashlib
 import hmac
 import json
@@ -146,3 +147,50 @@ async def test_case_insensitive_telegram_start_command(admin_config):
     filt = CommandStart(ignore_case=True)
     result = await filt(message, bot=None)
     assert result
+
+
+
+def test_bot_token_hash_can_include_telegram_signature_field(admin_config):
+    """Some Telegram clients include the extra signature field in bot HMAC."""
+    values = {'auth_date': str(int(time.time())),
+              'user': json.dumps({'id': 42, 'first_name': 'Owner'}, separators=(',', ':')),
+              'signature': 'test-third-party-signature'}
+    text = '\n'.join(f'{k}={v}' for k, v in sorted(values.items()))
+    key = hmac.new(b'WebAppData', settings.bot_token.encode(), hashlib.sha256).digest()
+    values['hash'] = hmac.new(key, text.encode(), hashlib.sha256).hexdigest()
+    payload = urlencode(values)
+    assert pricing.admin_from_init_data(payload) == 42
+    # Changing the user must invalidate the HMAC.
+    altered = payload.replace('Owner', 'Intruder')
+    with pytest.raises(HTTPException) as exc:
+        pricing.admin_from_init_data(altered)
+    assert exc.value.status_code == 401
+
+
+def test_real_telegram_ed25519_signature_fallback_without_hmac(admin_config, monkeypatch):
+    """Authenticate only a valid Telegram-signed session bound to our bot ID."""
+    from cryptography.hazmat.primitives.asymmetric.ed25519 import Ed25519PrivateKey
+    from cryptography.hazmat.primitives.serialization import Encoding, PublicFormat
+
+    signer = Ed25519PrivateKey.generate()
+    public = signer.public_key().public_bytes(Encoding.Raw, PublicFormat.Raw)
+    monkeypatch.setattr(pricing, 'TELEGRAM_PRODUCTION_KEY', public)
+    values = {
+        'auth_date': str(int(time.time())),
+        'user': json.dumps({'id': 42, 'first_name': 'Owner'}, separators=(',', ':')),
+        'hash': '0' * 64,
+    }
+    text = '\n'.join(f'{k}={v}' for k, v in sorted(values.items()) if k != 'hash')
+    bot_id = settings.bot_token.split(':', 1)[0]
+    signature = signer.sign((f'{bot_id}:WebAppData\n' + text).encode())
+    values['signature'] = base64.urlsafe_b64encode(signature).rstrip(b'=').decode()
+    assert pricing.admin_from_init_data(urlencode(values)) == 42
+    altered = dict(values, user=json.dumps({'id': 777, 'first_name': 'Owner'}))
+    with pytest.raises(HTTPException) as forgery:
+        pricing.admin_from_init_data(urlencode(altered))
+    assert forgery.value.status_code == 401
+    bad_bot = dict(values)
+    monkeypatch.setattr(settings, 'bot_token', '99887:ANOTHER_BOT')
+    with pytest.raises(HTTPException) as wrong_bot:
+        pricing.admin_from_init_data(urlencode(bad_bot))
+    assert wrong_bot.value.status_code == 401
