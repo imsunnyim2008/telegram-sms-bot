@@ -10,6 +10,7 @@ class Config(BaseSettings):
     bot_token: str = ''
     admin_ids: str = ''
     database_url: str = 'sqlite+aiosqlite:///./bot.db'
+    provider_name: str = 'grizzly'
     provider_api_key: str = ''
     live_purchases_enabled: bool = False
     wallet_currency: str = 'USD'
