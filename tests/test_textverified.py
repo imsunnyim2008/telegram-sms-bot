@@ -217,3 +217,16 @@ def test_textverified_settings_must_be_exact_usd(monkeypatch):
     monkeypatch.setattr(settings, "provider_price_to_wallet", Decimal("1"))
     monkeypatch.setattr(settings, "wallet_currency", "NGN")
     assert not settings.live_ready
+
+
+def test_old_provider_orders_stay_routed_to_the_original_provider(monkeypatch):
+    from app.business import BotError, Shop
+
+    monkeypatch.setattr(settings, "provider_name", "textverified")
+    current, old = object(), object()
+    shop = Shop(current, None, None)
+    shop.providers = {"textverified": current, "grizzly": old}
+    assert shop.provider_for("grizzly") is old
+    assert shop.provider_for("textverified") is current
+    with pytest.raises(BotError, match="unavailable"):
+        shop.provider_for("unknown-provider")
