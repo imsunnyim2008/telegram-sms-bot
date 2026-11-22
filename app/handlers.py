@@ -435,9 +435,43 @@ async def admin_price_save(target, uid: int, flow: dict, raw: str):
     if uid not in settings.admins:
         return
     try:
-        value = Decimal(raw.strip().replace('
+        value = Decimal(raw.strip().replace(chr(36), '', 1))
+        if not value.is_finite() or not (0 < value <= 1000) or value.as_tuple().exponent < -4:
+            raise ValueError()
+    except (ValueError, InvalidOperation):
+        await target.answer('Enter a valid USD price, e.g. 0.90 (up to 4 decimal places).')
+        return
+    item, _ = await shop.quote(service, country)
+    from .business import Q
+    from decimal import ROUND_UP
+    floor = (item.cost * settings.provider_price_to_wallet).quantize(Q, rounding=ROUND_UP)
+    if value < floor:
+        await target.answer(f'Price too low. Minimum allowed: {floor} USD. Send a higher price.')
+        return
+    value = value.quantize(Q)
+    async with Session.begin() as s:
+        key = f'price:{service}:{country}'
+        row = await s.get(Setting, key)
+        if row:
+            row.value = str(value)
+        else:
+            s.add(Setting(key=key, value=str(value)))
+    await clear_flow(uid)
+    await target.answer(
+        f'PUBLIC PRICE SAVED!\n{service.title()} / Country #{country}: {value} USD\n'
+        'Buyers see only your selling price, which is debited from their wallet at purchase.',
+        reply_markup=keyboard([
+            [('Change Another Price', 'ps:services:0')],
+            [('Reset This Price', f'ps:reset:{service}:{country}')],
+            [('Admin Settings', 'admin:settings')],
+        ]),
+    )
+
+
+async def show_balance(target, uid):
     user = await shop.get_user(uid)
-    await target.answer(f'Your balance: {user.balance} {settings.wallet_currency}', reply_markup=main_menu_for(uid))
+    await target.answer(f'Your balance: {user.balance} {settings.wallet_currency}',
+                        reply_markup=main_menu_for(uid))
 
 
 async def show_orders(target, uid):
