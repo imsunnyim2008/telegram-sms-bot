@@ -26,8 +26,16 @@ class BotError(Exception):
 class Shop:
     def __init__(self, provider: ProviderClient, gateway: CryptoBot, notifier: Any):
         self.provider = provider
+        self.providers = {settings.provider_name: provider}
         self.gateway = gateway
         self.notifier = notifier
+
+    def provider_for(self, provider_name: str) -> ProviderClient:
+        """Route existing orders to the provider that originally issued them."""
+        provider = self.providers.get(provider_name)
+        if provider is None:
+            raise BotError('Order provider is unavailable; contact support')
+        return provider
 
     async def ensure_user(self, user_id: int, username: str = '') -> User:
         async with Session.begin() as s:
@@ -181,8 +189,9 @@ class Shop:
             if (utcnow().replace(tzinfo=None) - created).total_seconds() < 30:
                 raise BotError('Please wait 30 seconds before cancelling')
             oid = row.provider_order_id
+            provider_name = row.provider
         try:
-            result = await self.provider.cancel(oid)
+            result = await self.provider_for(provider_name).cancel(oid)
             if str(result.get('status', '')).upper() not in {'CANCELED', 'CANCELLED'}:
                 raise BotError('Provider did not confirm cancellation; balance unchanged')
         except ProviderError as exc:
@@ -197,15 +206,17 @@ class Shop:
             if not row or row.status != 'manual_review':
                 return
             service, country, created = row.service, row.country, row.created_at
+            provider_name = row.provider
             expiry = row.expires_at.replace(tzinfo=timezone.utc) if row.expires_at.tzinfo is None else row.expires_at
             linked = set((await s.scalars(select(Activation.provider_order_id).where(
                 Activation.provider_order_id.is_not(None)))).all())
-        if not getattr(self.provider, 'supports_complete_order_history', True):
+        provider = self.providers.get(provider_name)
+        if provider is None or not getattr(provider, 'supports_complete_order_history', True):
             # Active-only history cannot prove that a chargeable order was not made.
             # Hold for operator review instead of risking an unverified refund.
             return
         try:
-            orders = await self.provider.recent_orders()
+            orders = await provider.recent_orders()
         except Exception:
             return
         candidates = []
