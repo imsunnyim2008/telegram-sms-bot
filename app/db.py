@@ -79,6 +79,13 @@ class Payment(Base):
     __table_args__ = (UniqueConstraint('gateway', 'gateway_invoice_id', name='uniq_invoice'),)
 
 
+class TelegramUpdateReceipt(Base):
+    """Durable idempotency guard for incoming Telegram webhook updates."""
+    __tablename__ = 'telegram_update_receipts'
+    update_id: Mapped[int] = mapped_column(BigInteger, primary_key=True)
+    processed_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utcnow)
+
+
 class Setting(Base):
     __tablename__ = 'settings'
     key: Mapped[str] = mapped_column(String(80), primary_key=True)

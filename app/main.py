@@ -1,21 +1,25 @@
 """Render/web deployment entrypoint: one web service runs Telegram + payment callbacks."""
 import asyncio
+import hashlib
+import hmac
 import json
 import logging
 from contextlib import asynccontextmanager
 
 from aiogram import Bot, Dispatcher
+from aiogram.types import Update
 from fastapi import BackgroundTasks, FastAPI, HTTPException, Request
 
 from .business import Shop
 from .config import settings
-from .db import engine, init_db
+from .db import engine, init_db, Session, TelegramUpdateReceipt
 from .gateway import CryptoBot
 from .nowpayments import NowPayments
 from .handlers import router, set_shop
 from .provider import FiveSim
 from .grizzly import GrizzlySms
 from .workers import Worker
+from sqlalchemy.exc import IntegrityError
 
 logging.basicConfig(level=logging.INFO, format='%(asctime)s %(levelname)s %(name)s %(message)s')
 log = logging.getLogger(__name__)
@@ -61,9 +65,20 @@ async def lifespan(app: FastAPI):
     dp.include_router(router)
     worker = Worker(shop)
     runtime['shop'] = shop
-    tasks = [asyncio.create_task(dp.start_polling(bot, handle_signals=False)),
-             asyncio.create_task(worker.run())]
-    log.info('Telegram bot and persistent pollers started')
+    runtime.update({'bot': bot, 'dp': dp, 'worker': worker})
+    # Telegram's inbound HTTP webhook wakes a sleeping Render Free service.
+    # Outbound long-polling cannot wake a sleeping service.
+    if not settings.public_base_url.startswith('https://'):
+        raise RuntimeError('Telegram webhook requires PUBLIC_BASE_URL with https')
+    await bot.set_webhook(
+        settings.public_base_url.rstrip('/') + '/webhook/telegram',
+        secret_token=telegram_webhook_secret(),
+        drop_pending_updates=False,
+        allowed_updates=dp.resolve_used_update_types(),
+        max_connections=4,
+    )
+    tasks = [asyncio.create_task(worker.run())]
+    log.info('Telegram signed webhook and SMS polling worker started')
     try:
         yield
     finally:
@@ -95,6 +110,42 @@ async def process_payment(invoice_id: str):
         await runtime['shop'].verify_and_credit(invoice_id)
     except Exception:
         log.exception('Payment verification failed')
+
+
+def telegram_webhook_secret() -> str:
+    # Derived from the private BOT_TOKEN. Never emit in logs or URLs.
+    return hashlib.sha256(('Friday-webhook-v1:' + settings.bot_token).encode()).hexdigest()
+
+
+@web.post('/webhook/telegram')
+async def telegram_webhook(request: Request):
+    secret = request.headers.get('x-telegram-bot-api-secret-token', '')
+    if not hmac.compare_digest(secret, telegram_webhook_secret()):
+        raise HTTPException(status_code=403, detail='Invalid webhook authentication')
+    body = await request.body()
+    if len(body) > 65536:
+        raise HTTPException(status_code=413, detail='Telegram event is too large')
+    try:
+        event = Update.model_validate(json.loads(body), context={'bot': runtime['bot']})
+    except (ValueError, TypeError, KeyError):
+        raise HTTPException(status_code=400, detail='Malformed Telegram update')
+    if event.update_id < 0:
+        raise HTTPException(status_code=400, detail='Malformed update ID')
+    # One-time durable claim before executing potentially chargeable callbacks.
+    # If a handler fails, user can retry their action; automatic Telegram
+    # retries must NOT issue a second chargeable SMS purchase.
+    try:
+        async with Session.begin() as s:
+            s.add(TelegramUpdateReceipt(update_id=event.update_id))
+            await s.flush()
+    except IntegrityError:
+        return {'ok': True, 'duplicate': True}
+    try:
+        await runtime['dp'].feed_update(runtime['bot'], event)
+    except Exception:
+        log.exception('Telegram webhook handler failed; update claimed to avoid duplicate charges')
+        # Return 200: a Telegram retry would not be safe for paid purchases.
+    return {'ok': True}
 
 
 @web.post('/webhook/cryptobot')
