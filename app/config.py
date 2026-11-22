@@ -15,7 +15,12 @@ class Config(BaseSettings):
     live_purchases_enabled: bool = False
     wallet_currency: str = 'USD'
     provider_price_to_wallet: Decimal = Decimal('0')
+    payment_provider: str = 'cryptobot'
     payment_api_key: str = ''
+    nowpayments_api_key: str = ''
+    nowpayments_ipn_secret: str = ''
+    nowpayments_api_base: str = 'https://api.nowpayments.io/v1'
+    public_base_url: str = ''
     payments_enabled: bool = False
     payment_base_url: str = 'https://pay.crypt.bot/api'
     markup_percent: Decimal = Decimal('50')
@@ -47,6 +52,9 @@ class Config(BaseSettings):
 
     @property
     def payment_ready(self) -> bool:
+        if self.payment_provider == 'nowpayments':
+            return bool(self.payments_enabled and self.nowpayments_api_key
+                        and self.nowpayments_ipn_secret and self.public_base_url.startswith('https://'))
         return bool(self.payments_enabled and self.payment_api_key)
 
 

@@ -231,7 +231,7 @@ async def topup_command(message: Message):
         f'Invoice for {invoice["amount"]} {settings.wallet_currency}. '
         'Only pay via the gateway link below. Your wallet credits after confirmed payment.',
         reply_markup=InlineKeyboardMarkup(inline_keyboard=[[
-            InlineKeyboardButton(text='Pay via Crypto Bot', url=invoice['url']),
+            InlineKeyboardButton(text=('Pay via NOWPayments' if settings.payment_provider == 'nowpayments' else 'Pay via Crypto Bot'), url=invoice['url']),
         ]]),
     )
 
@@ -250,7 +250,8 @@ async def admin_setupcheck(message: Message):
              f'Wallet currency: {settings.wallet_currency}',
              f'Price conversion configured: {"YES" if settings.provider_price_to_wallet > 0 else "NO"}',
              f'SMS purchasing enabled: {"YES" if settings.live_purchases_enabled else "NO"}',
-             f'Payment acceptance enabled: {"YES" if settings.payments_enabled else "NO"}']
+             f'Payment acceptance enabled: {"YES" if settings.payments_enabled else "NO"}',
+             f'Payment gateway: {settings.payment_provider}']
     if not settings.provider_api_key:
         lines.append(f'{settings.provider_name.title()} API: key missing')
     else:
@@ -259,7 +260,20 @@ async def admin_setupcheck(message: Message):
             lines.append(f'{settings.provider_name.title()} API: connected (provider balance {balance} raw units)')
         except Exception:
             lines.append(f'{settings.provider_name.title()} API: connection or authorization failed')
-    if not settings.payment_api_key:
+    if settings.payment_provider == 'nowpayments':
+        if not settings.nowpayments_api_key:
+            lines.append('NOWPayments API: key missing')
+        else:
+            try:
+                await shop.gateway.check_credentials()
+                lines.append('NOWPayments API: connected')
+            except Exception:
+                lines.append('NOWPayments API: connection or authorization failed')
+        lines.append('NOWPayments IPN secret: ' +
+                     ('configured' if settings.nowpayments_ipn_secret else 'missing'))
+        lines.append('Public callback URL: ' +
+                     ('configured' if settings.public_base_url.startswith('https://') else 'missing'))
+    elif not settings.payment_api_key:
         lines.append('Crypto Pay API: key missing')
     else:
         try:

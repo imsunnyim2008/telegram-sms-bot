@@ -1,5 +1,47 @@
 # Telegram Virtual Number SMS Bot — Phone-Friendly V1
 
+## NOWPayments integration (staged; requires review)
+
+Friday can be configured to use NOWPayments hosted crypto checkout instead of Crypto Bot.
+Changes are fail-closed: the existing payment integration remains the default and
+`PAYMENTS_ENABLED=false` blocks all new customer top-ups until your credentials
+and IPN callback are confirmed.
+
+Add these secrets **only** in the Friday service's Render Environment settings:
+
+```env
+PAYMENT_PROVIDER=nowpayments
+NOWPAYMENTS_API_KEY=<merchant API key from NOWPayments>
+NOWPAYMENTS_IPN_SECRET=<IPN secret from Payment Settings>
+PUBLIC_BASE_URL=https://telegram-sms-bot-tgcg.onrender.com
+PAYMENTS_ENABLED=false
+```
+
+Set your **withdrawal/payout wallet** in NOWPayments before taking payment.
+The IPN callback URL for this service is
+`https://telegram-sms-bot-tgcg.onrender.com/webhook/nowpayments`.
+It is sent in each invoice creation request and uses HMAC-SHA512
+signature verification (`x-nowpayments-sig`) with recursively sorted JSON.
+Each completed payment is re-checked using NOWPayments'
+`GET /v1/payment/{payment_id}` before updating the DB ledger.
+Wallet credit happens once per local invoice (unique ledger reference).
+Only a `finished` payment with matching invoice ID, order ID, fiat currency
+and amount qualifies. No credit occurs on `waiting`, `confirmed` or
+`partially_paid` status. No customer can trigger a credit by
+typing an invoice ID.
+
+**Known limitation:** Hosted invoice payment IDs do not exist until checkout.
+NOWPayments is therefore verified from signed IPN callbacks rather than
+invoice-ID polling. Lost/failed IPNs require manual reconciliation using
+the provider's dashboard; build a durable callback inbox, admin reconciliation
+and integration tests before public launch. Render free tier sleeps;
+use reliable hosting for real payments. Test an authorized small payment and
+a refund/cancellation path before changing `PAYMENTS_ENABLED=true`.
+
+Gateway docs: https://nowpayments.zendesk.com/hc/en-us/articles/21345824322717-API-and-endpoint-description
+IPN docs: https://nowpayments.zendesk.com/hc/en-us/articles/21395546303389-IPN-and-how-to-setup
+
+
 ## Grizzly SMS integration (November 2026)
 
 **Provider changed from 5SIM to Grizzly SMS.** The default backend is now

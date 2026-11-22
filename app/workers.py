@@ -144,7 +144,10 @@ class Worker:
                 row.next_poll_at = utcnow()
 
     async def poll_payments(self):
-        if not settings.payment_ready:
+        # Hosted NOWPayments invoices generate payment IDs only when the payer
+        # begins checkout. Trust only signed IPN + authenticated payment lookup.
+        # Do not poll the invoice ID through the Crypto Bot status API.
+        if not settings.payment_ready or settings.payment_provider != 'cryptobot':
             return
         async with Session() as s:
             invoice_ids = (await s.scalars(select(Payment.gateway_invoice_id).where(
