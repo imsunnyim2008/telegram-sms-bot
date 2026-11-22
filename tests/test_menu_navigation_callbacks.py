@@ -113,6 +113,7 @@ async def test_order_refresh_keeps_check_cancel_buttons_in_single_card(setup_dat
     assert len(card.edits) == 2
     content, kwargs = card.edits[-1]
     assert "15557778888" in content
+    assert "App: ✈️ Telegram" in content
     buttons = [button.callback_data for row in kwargs["reply_markup"].inline_keyboard
                for button in row]
     assert f"check:{aid}" in buttons
@@ -172,3 +173,23 @@ async def test_no_menu_tracking_or_deletion_in_groups(setup_database):
     await handlers.discard_active_menu(request)
     async with session() as db:
         assert await db.get(Setting, handlers.menu_key(-1001)) is None
+
+
+@pytest.mark.asyncio
+async def test_whatsapp_sms_status_and_orders_show_app_label(setup_database):
+    session, shop, _ = setup_database
+    card = Card(99)
+    async with session.begin() as db:
+        db.add(Activation(
+            user_id=99, service="whatsapp", country="12",
+            status="completed", phone="15557771111", code="678912",
+            expires_at=datetime.now(timezone.utc) + timedelta(minutes=15),
+            cost_provider=Decimal("0.25"), price_charged=Decimal("0.80"),
+        ))
+    await handlers.callbacks(Click(99, card, "check:1"))
+    assert "App: 💬 WhatsApp" in card.edits[-1][0]
+    assert "Number: 15557771111" in card.edits[-1][0]
+    assert "678912" in card.edits[-1][0]
+    await handlers.callbacks(Click(99, card, "orders"))
+    assert "App: 💬 WhatsApp" in card.edits[-1][0]
+    assert "678912" not in card.edits[-1][0]
