@@ -120,9 +120,11 @@ async def cryptobot_webhook(request: Request, background: BackgroundTasks):
     return {'ok': True}
 
 
-async def process_nowpayments_payment(invoice_id: str, payment_id: str):
+async def process_nowpayments_payment(order_id: str | None,
+                                      invoice_id: str | None, payment_id: str):
     try:
-        await runtime['shop'].verify_and_credit_nowpayments(invoice_id, payment_id)
+        await runtime['shop'].verify_and_credit_nowpayments(
+            invoice_id, payment_id, order_id=order_id)
     except Exception:
         # Never log API credentials, signed payloads, or private wallet data.
         log.exception('NOWPayments payment verification task failed')
@@ -147,13 +149,30 @@ async def nowpayments_webhook(request: Request, background: BackgroundTasks):
         event = json.loads(raw)
         if not isinstance(event, dict):
             raise ValueError()
-        invoice_id = str(event['invoice_id'])
-        payment_id = str(event['payment_id'])
-        if not (invoice_id.isascii() and invoice_id.isdigit() and len(invoice_id) <= 40
-                and payment_id.isascii() and payment_id.isdigit() and len(payment_id) <= 40):
-            raise ValueError()
-    except (ValueError, TypeError, KeyError):
+    except (ValueError, TypeError):
         raise HTTPException(status_code=400, detail='Malformed IPN event')
-    if event.get('payment_status') == 'finished':
-        background.add_task(process_nowpayments_payment, invoice_id, payment_id)
+    if event.get('payment_status') != 'finished':
+        # Intermediate statuses are handled by NOWPayments. Never credit them.
+        return {'ok': True}
+    order_id = event.get('order_id')
+    if not isinstance(order_id, str) or not (
+        order_id.startswith('friday-topup-') and
+        order_id[len('friday-topup-'):].isascii() and
+        order_id[len('friday-topup-'):].isdigit() and len(order_id) <= 55
+    ):
+        order_id = None
+    invoice_id = event.get('invoice_id')
+    invoice_id = str(invoice_id) if invoice_id is not None else None
+    if invoice_id is not None and not (invoice_id.isascii() and
+                                       invoice_id.isdigit() and len(invoice_id) <= 40):
+        invoice_id = None
+    payment_id = str(event.get('payment_id', ''))
+    if not (payment_id.isascii() and payment_id.isdigit() and len(payment_id) <= 40):
+        raise HTTPException(status_code=400, detail='Malformed payment ID')
+    if not order_id and not invoice_id:
+        log.warning('Signed finished NOWPayments IPN has no usable order reference')
+        return {'ok': True}
+    # Hosted invoice notifications may carry invoice_id=null. Local order_id
+    # still uniquely links a customer to their previously created invoice.
+    background.add_task(process_nowpayments_payment, order_id, invoice_id, payment_id)
     return {'ok': True}
