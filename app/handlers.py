@@ -254,7 +254,7 @@ async def admin_setupcheck(message: Message):
     else:
         try:
             balance = await shop.provider.get_balance()
-            lines.append(f'{settings.provider_name.title()} API: connected (provider balance {balance} raw units)')
+            lines.append(ff'{settings.provider_name.title()} API: connected (provider balance {balance} raw units)')
         except Exception:
             lines.append(f'{settings.provider_name.title()} API: connection or authorization failed')
     if not settings.payment_api_key:
