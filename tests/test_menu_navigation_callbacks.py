@@ -7,7 +7,9 @@ import pytest
 
 import app.handlers as handlers
 from app.db import Activation, Setting
-from test_inbot_pricing_topup import setup_database
+import test_inbot_pricing_topup as test_fixtures
+
+setup_database = test_fixtures.setup_database
 
 
 class Card:
