@@ -66,7 +66,8 @@ async def test_confirm_purchase_sends_order_then_deletes_confirmation(monkeypatc
     await handlers.callbacks(MenuCallback('buy:telegram:12', msg))
     assert [event[0] for event in msg.events] == ['ack', 'send', 'delete']
     assert 'Order #7' in msg.events[1][1]
-    assert 'App: ✈️ Telegram' in msg.events[1][1]
+    assert 'App: <tg-emoji emoji-id="5415999505952705793">📱</tg-emoji> Telegram' in msg.events[1][1]
+    assert msg.events[1][2]['parse_mode'] == 'HTML'
     assert 'Number: 18176721188' in msg.events[1][1]
     assert 'Check SMS' in msg.events[1][2]['reply_markup'].inline_keyboard[0][0].text
 
@@ -101,16 +102,16 @@ async def test_failed_quote_keeps_country_list(monkeypatch, allowed_user):
     assert 'No numbers available' in msg.events[1][1]
 
 
-@pytest.mark.parametrize('service, expected', [
-    ('whatsapp', '💬 WhatsApp'),
-    ('facebook', '📘 Facebook'),
-    ('instagram', '📸 Instagram'),
-    ('google', '🌐 Google'),
-    ('custom_service', '📱 Custom Service'),
+@pytest.mark.parametrize('service, expected_name, expected_id', [
+    ('whatsapp', 'WhatsApp', '5418150421279572914'),
+    ('facebook', 'Facebook', '5418039855936472761'),
+    ('instagram', 'Instagram', '5418261965875217473'),
+    ('google', 'Google', '5417924815237444975'),
+    ('custom_service', 'Custom Service', None),
 ])
 @pytest.mark.asyncio
 async def test_purchase_receipt_shows_correct_app_for_every_service(
-        monkeypatch, allowed_user, service, expected):
+        monkeypatch, allowed_user, service, expected_name, expected_id):
     class FakeShop:
         async def buy(self, uid, chosen_service, country):
             assert (uid, chosen_service, country) == (77, service, '12')
@@ -121,5 +122,10 @@ async def test_purchase_receipt_shows_correct_app_for_every_service(
     await handlers.callbacks(MenuCallback(f'buy:{service}:12', msg))
     assert [event[0] for event in msg.events] == ['ack', 'send', 'delete']
     body = msg.events[1][1]
-    assert f'App: {expected}' in body
+    assert f'{expected_name}' in body
+    if expected_id:
+        assert f'<tg-emoji emoji-id="{expected_id}">📱</tg-emoji>' in body
+    else:
+        assert '<tg-emoji' not in body
+    assert msg.events[1][2]['parse_mode'] == 'HTML'
     assert 'Number: 15551110000' in body

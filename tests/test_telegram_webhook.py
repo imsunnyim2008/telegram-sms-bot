@@ -75,7 +75,7 @@ async def test_sms_check_replays_saved_code_only_to_order_owner(monkeypatch):
 
     class Target:
         def __init__(self): self.answers = []
-        async def answer(self, msg): self.answers.append(msg)
+        async def answer(self, msg, **kwargs): self.answers.append(msg)
     owner, stranger = Target(), Target()
     await handlers.check_sms(stranger, 222, 10)
     await handlers.check_sms(owner, 221, 10)

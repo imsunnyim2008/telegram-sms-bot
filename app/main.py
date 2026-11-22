@@ -7,6 +7,7 @@ import logging
 from contextlib import asynccontextmanager
 
 from aiogram import Bot, Dispatcher
+from aiogram.exceptions import TelegramBadRequest
 from aiogram.types import Update
 from fastapi import BackgroundTasks, FastAPI, HTTPException, Request
 
@@ -21,6 +22,7 @@ from .command_menu import register_native_menu
 from .provider import FiveSim
 from .grizzly import GrizzlySms
 from .workers import Worker
+from .service_ui import custom_emoji_unavailable, without_custom_emoji
 from sqlalchemy.exc import IntegrityError
 
 logging.basicConfig(level=logging.INFO, format='%(asctime)s %(levelname)s %(name)s %(message)s')
@@ -34,9 +36,17 @@ class TelegramNotifier:
     def __init__(self, bot):
         self.bot = bot
 
-    async def send(self, user_id: int, message: str):
-        # Do not print messages/codes in logs.
-        await self.bot.send_message(user_id, message)
+    async def send(self, user_id: int, message: str, *, parse_mode: str | None = None):
+        # Never print phone numbers or verification codes in logs.
+        try:
+            await self.bot.send_message(user_id, message, parse_mode=parse_mode)
+        except TelegramBadRequest as exc:
+            if parse_mode != "HTML" or not custom_emoji_unavailable(exc):
+                raise
+            # Only retry if the custom-emoji entity was rejected (e.g. bot
+            # owner lacks Premium). Retain the app name, never send false logos.
+            await self.bot.send_message(user_id, without_custom_emoji(message),
+                                        parse_mode=None)
 
 
 runtime = {}
