@@ -3,15 +3,19 @@
 The HTML page contains no secrets. API calls require a correctly signed and
 fresh Telegram WebApp.initData value whose user ID is in ADMIN_IDS.
 """
+import base64
 import hashlib
 import hmac
 import json
+import logging
 import re
 import time
 from decimal import Decimal, InvalidOperation, ROUND_UP
 from pathlib import Path
 from urllib.parse import parse_qsl
 
+from cryptography.exceptions import InvalidSignature
+from cryptography.hazmat.primitives.asymmetric.ed25519 import Ed25519PublicKey
 from fastapi import APIRouter, HTTPException, Request
 from fastapi.responses import HTMLResponse, JSONResponse
 from sqlalchemy import select
@@ -24,6 +28,11 @@ from .provider import ProviderError
 
 
 router = APIRouter()
+log = logging.getLogger(__name__)
+# Telegram production Ed25519 public key, for third-party Mini App validation.
+# This is public, not an API secret. See core.telegram.org/bots/webapps.
+TELEGRAM_PRODUCTION_KEY = bytes.fromhex(
+    'e7bf03a2fa4602af4580703d88dda5bb59f32ed8b02a56c187fe7d34caed242d')
 _PRICE_KEY = re.compile(r'^price:([a-z0-9_]{1,35}):([0-9]{1,6})$')
 _NO_CACHE = {'Cache-Control': 'no-store'}
 
@@ -39,12 +48,44 @@ def admin_from_init_data(payload: str, *, now: int | None = None) -> int:
     claim = data.get('hash', '')
     if not re.fullmatch(r'[0-9a-fA-F]{64}', claim):
         raise HTTPException(status_code=401, detail='Invalid Telegram session')
-    # Telegram's optional signature is for third-party public-key validation.
-    check = '\n'.join(f'{key}={value}' for key, value in sorted(data.items())
-                      if key not in ('hash', 'signature'))
+    # Telegram has supplied both an HMAC "hash" and (Bot API 8+) a
+    # third-party Ed25519 "signature". Across Telegram clients, bot-token
+    # hash canonicalization may include or omit the signature field.
+    # Both forms still require a valid, constant-time HMAC under our bot key.
     key = hmac.new(b'WebAppData', settings.bot_token.encode(), hashlib.sha256).digest()
-    expected = hmac.new(key, check.encode(), hashlib.sha256).hexdigest()
-    if not hmac.compare_digest(expected, claim.lower()):
+    check_without_signature = '\n'.join(
+        f'{k}={v}' for k, v in sorted(data.items()) if k not in ('hash', 'signature'))
+    check_with_signature = '\n'.join(
+        f'{k}={v}' for k, v in sorted(data.items()) if k != 'hash')
+    valid_hmac = any(
+        hmac.compare_digest(
+            hmac.new(key, check.encode(), hashlib.sha256).hexdigest(), claim.lower())
+        for check in (check_without_signature, check_with_signature)
+    )
+    # Independently, the current Telegram clients can authenticate with
+    # Telegram's documented Ed25519 signature. Verify it for *this* bot ID;
+    # the signature can never substitute for an administrator permission check.
+    valid_telegram_signature = False
+    signature = data.get('signature', '')
+    if not valid_hmac and signature and len(signature) <= 120:
+        try:
+            raw_signature = base64.urlsafe_b64decode(
+                signature + '=' * (-len(signature) % 4))
+            bot_id = settings.bot_token.split(':', 1)[0]
+            if not bot_id.isascii() or not bot_id.isdigit():
+                raise ValueError('Invalid bot ID')
+            to_check = (f'{bot_id}:WebAppData\n' +
+                        check_without_signature).encode('utf-8')
+            Ed25519PublicKey.from_public_bytes(TELEGRAM_PRODUCTION_KEY).verify(
+                raw_signature, to_check)
+            valid_telegram_signature = True
+        except (ValueError, InvalidSignature):
+            pass
+    if not (valid_hmac or valid_telegram_signature):
+        # Record only the presence of fields. NEVER log initData, URL,
+        # user details, HMACs, signatures, or Telegram credentials.
+        log.warning('Telegram pricing auth rejected: fields hash=%s signature=%s user=%s',
+                    bool(data.get('hash')), bool(data.get('signature')), bool(data.get('user')))
         raise HTTPException(status_code=401, detail='Invalid Telegram session')
     try:
         auth_at = int(data['auth_date'])

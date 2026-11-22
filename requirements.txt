@@ -9,3 +9,5 @@ pydantic-settings>=2.4,<3
 alembic>=1.13,<2
 
 pycountry>=24.6,<25
+
+cryptography>=43,<47
