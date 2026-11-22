@@ -121,7 +121,9 @@ async def callbacks(callback: CallbackQuery):
         elif data.startswith('preview:'):
             _, service, country = data.split(':')
             item, charge = await shop.quote(service, country)
-            names = await shop.provider.get_country_names() if hasattr(shop.provider, 'get_country_names') else {}
+            provider = getattr(shop, 'provider', None)
+            names = (await provider.get_country_names()
+                     if hasattr(provider, 'get_country_names') else {})
             selected_country = names.get(country, f'Country #{country}')
             await callback.message.answer(
                 f'{service.title()} • {country_flag(selected_country)} {selected_country}\n'
