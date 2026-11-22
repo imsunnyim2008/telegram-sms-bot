@@ -28,6 +28,17 @@ def canonical_json(obj):
     return obj
 
 
+def js_normalize_numbers(obj):
+    """Match JSON.stringify's integer rendering for parsed 1.0, 0.0, etc."""
+    if isinstance(obj, dict):
+        return {key: js_normalize_numbers(value) for key, value in obj.items()}
+    if isinstance(obj, list):
+        return [js_normalize_numbers(value) for value in obj]
+    if isinstance(obj, float) and obj.is_integer() and abs(obj) <= 9007199254740991:
+        return int(obj)
+    return obj
+
+
 class NowPayments:
     def __init__(self, client: httpx.AsyncClient | None = None):
         self.client = client or httpx.AsyncClient(timeout=20)
@@ -99,11 +110,18 @@ class NowPayments:
             # while SDKs also support deep-sorted nested fee objects. Both
             # representations MUST have a matching HMAC-SHA512 with the
             # merchant's IPN secret. Never accept unsigned payloads.
+            deep = canonical_json(obj)
+            flat = dict(sorted(obj.items()))
             candidates = [
-                json.dumps(canonical_json(obj), separators=(",", ":"),
+                json.dumps(deep, separators=(",", ":"),
                            ensure_ascii=False).encode("utf-8"),
-                json.dumps(dict(sorted(obj.items())), separators=(",", ":"),
+                json.dumps(flat, separators=(",", ":"),
                            ensure_ascii=False).encode("utf-8"),
+                json.dumps(js_normalize_numbers(deep), separators=(",", ":"),
+                           ensure_ascii=False).encode("utf-8"),
+                json.dumps(js_normalize_numbers(flat), separators=(",", ":"),
+                           ensure_ascii=False).encode("utf-8"),
+                raw_body.strip(),
             ]
         except (ValueError, UnicodeError, TypeError):
             return False
