@@ -90,6 +90,7 @@ class Shop:
                 raise BotError('Please wait 3 seconds between purchases')
             activation = Activation(
                 user_id=user_id, service=service, country=country,
+                provider=settings.provider_name,
                 cost_provider=item.cost, price_charged=charge,
                 status='ordering', expires_at=utcnow() + timedelta(seconds=settings.activation_timeout_seconds),
                 next_poll_at=utcnow() + timedelta(seconds=10),
@@ -169,6 +170,10 @@ class Shop:
             expiry = row.expires_at.replace(tzinfo=timezone.utc) if row.expires_at.tzinfo is None else row.expires_at
             linked = set((await s.scalars(select(Activation.provider_order_id).where(
                 Activation.provider_order_id.is_not(None)))).all())
+        if not getattr(self.provider, 'supports_complete_order_history', True):
+            # Active-only history cannot prove that a chargeable order was not made.
+            # Hold for operator review instead of risking an unverified refund.
+            return
         try:
             orders = await self.provider.recent_orders()
         except Exception:
