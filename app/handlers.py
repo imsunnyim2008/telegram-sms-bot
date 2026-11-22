@@ -336,6 +336,7 @@ async def admin_testall(message: Message):
     else:
         lines.append('Payment provider: Crypto Bot (NOWPayments inactive)')
     lines.append('Payments enabled: ' + ('YES' if settings.payment_ready else 'NO'))
+    lines.append('New top-ups: ' + ('ADMIN TEST ONLY' if settings.payment_test_admin_only else 'OPEN TO USERS'))
     lines.append('SMS buying enabled: ' + ('YES' if settings.live_ready else 'NO'))
     lines.append('⚠️ Provider payments, incoming IPNs, SMS arrival and refunds require'
                  ' separate real-world tests. No money moved by this check.')
