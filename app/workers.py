@@ -2,13 +2,14 @@
 import asyncio
 import logging
 from datetime import timedelta, timezone
+from html import escape
 
 from sqlalchemy import select
 
 from .config import settings
 from .db import Activation, Payment, Session, Setting, utcnow
 from .provider import ProviderError
-from .service_ui import app_label
+from .service_ui import app_label_html
 
 log = logging.getLogger(__name__)
 
@@ -115,8 +116,9 @@ class Worker:
             try:
                 await self.shop.notifier.send(
                     user_id,
-                    f'🔐 Your verification code for order #{aid}: {code}\n'
-                    f'App: {app_label(service)}',
+                    f'🔐 Your verification code for order #{aid}: {escape(str(code))}\n'
+                    f'App: {app_label_html(service)}',
+                    parse_mode='HTML',
                 )
             except Exception:
                 # Keep received state so we can retry notification after a restart.
