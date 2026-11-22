@@ -129,3 +129,46 @@ async def test_accept_terms_replaces_terms_prompt(setup_database):
     assert len(card.edits) == 1
     assert card.edits[-1][0] == "Accepted. Welcome!"
     assert not card.answers
+
+
+@pytest.mark.asyncio
+async def test_latest_slash_command_menu_replaces_old_menu_without_deleting_invoices(setup_database):
+    session, shop, _ = setup_database
+
+    class Bot:
+        def __init__(self):
+            self.deleted = []
+
+        async def delete_message(self, chat_id, message_id):
+            self.deleted.append((chat_id, message_id))
+
+    bot = Bot()
+    request = SimpleNamespace(chat=SimpleNamespace(id=99, type="private"), bot=bot)
+    await handlers.track_menu(request, SimpleNamespace(message_id=100))
+    await handlers.track_menu(request, SimpleNamespace(message_id=101))
+    assert bot.deleted == [(99, 100)]
+
+    async with session() as db:
+        current = await db.get(Setting, handlers.menu_key(99))
+        assert current.value == "101"
+
+    # Native /check, /help, /buy etc. retire only the menu, not unrelated
+    # bot messages (such as a paid invoice or a sensitive SMS receipt).
+    await handlers.discard_active_menu(request)
+    assert bot.deleted == [(99, 100), (99, 101)]
+    async with session() as db:
+        assert await db.get(Setting, handlers.menu_key(99)) is None
+
+
+@pytest.mark.asyncio
+async def test_no_menu_tracking_or_deletion_in_groups(setup_database):
+    session, _, _ = setup_database
+    class Bot:
+        async def delete_message(self, **kwargs):
+            raise AssertionError("Must not delete group messages")
+
+    request = SimpleNamespace(chat=SimpleNamespace(id=-1001, type="group"), bot=Bot())
+    await handlers.track_menu(request, SimpleNamespace(message_id=123))
+    await handlers.discard_active_menu(request)
+    async with session() as db:
+        assert await db.get(Setting, handlers.menu_key(-1001)) is None
