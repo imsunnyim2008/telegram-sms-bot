@@ -22,6 +22,9 @@ from .command_menu import register_native_menu
 from .provider import FiveSim
 from .grizzly import GrizzlySms
 from .textverified import TextVerifiedSms
+from .textverified_webhooks import (valid_signature as valid_textverified_signature,
+                                    parse_event as parse_textverified_event,
+                                    wake_matching_orders)
 from .workers import Worker
 from .service_ui import custom_emoji_unavailable, without_custom_emoji
 from sqlalchemy.exc import IntegrityError
@@ -171,6 +174,30 @@ async def telegram_webhook(request: Request):
     except Exception:
         log.exception('Telegram webhook handler failed; update claimed to avoid duplicate charges')
         # Return 200: a Telegram retry would not be safe for paid purchases.
+    return {'ok': True}
+
+
+@web.post('/webhook/textverified')
+async def textverified_webhook(request: Request):
+    """TextVerified.com SMS webhook; it cannot directly set codes or issue refunds."""
+    if not settings.textverified_webhook_secret:
+        # Fail closed until the dashboard-provided signing secret is added
+        # to Render (not the TextVerified API key).
+        raise HTTPException(status_code=503, detail='TextVerified webhook not configured')
+    body = await request.body()
+    if len(body) > 65536:
+        raise HTTPException(status_code=413, detail='Webhook payload too large')
+    signature = request.headers.get('x-webhook-signature', '')
+    if not valid_textverified_signature(body, signature, settings.textverified_webhook_secret):
+        raise HTTPException(status_code=401, detail='Invalid TextVerified signature')
+    try:
+        event = parse_textverified_event(body)
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail='Malformed TextVerified event') from exc
+    # Durable dedup and ownership checks; regular poll worker retrieves the
+    # code from the authenticated provider API. The public request is never
+    # allowed to set an OTP, credit wallets, cancel, or purchase a number.
+    await wake_matching_orders(event)
     return {'ok': True}
 
 
