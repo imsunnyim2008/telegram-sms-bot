@@ -33,7 +33,7 @@ async def test_auth_service_inventory_pricing_and_us_only():
             assert req.url.params["reservationType"] == "verification"
             return httpx.Response(200, json=[
                 {"serviceName": "telegram", "capability": "sms"},
-                {"serviceName": "whatsapp", "capability": "sms"},
+                {"serviceName": "whatsapp", "capability": "smsAndVoiceCombo"},
                 {"serviceName": "notallowed", "capability": "sms"},
             ])
         if path.endswith("/inventory/verifications"):
@@ -173,3 +173,47 @@ async def test_cancel_requires_actual_refund():
     async with httpx.AsyncClient(transport=httpx.MockTransport(reply)) as client:
         with pytest.raises(ProviderError, match="refund not confirmed"):
             await TextVerifiedSms(client).cancel("test123")
+
+
+@pytest.mark.asyncio
+async def test_failure_fetching_purchased_number_keeps_order_for_manual_review():
+    posts = 0
+    def reply(req):
+        nonlocal posts
+        path = req.url.path
+        if path.endswith("/auth"):
+            return httpx.Response(200, json={"token": "bearer", "expiresIn": 899})
+        if path.endswith("/services"):
+            return httpx.Response(200, json=[{"serviceName": "telegram", "capability": "sms"}])
+        if path.endswith("/inventory/verifications"):
+            return httpx.Response(200, json={"availableQuantity": 5})
+        if path.endswith("/pricing/verifications"):
+            return httpx.Response(200, json={"price": 1})
+        if path == "/api/pub/v2/verifications" and req.method == "POST":
+            posts += 1
+            return httpx.Response(200, json={
+                "method": "GET", "href": "/api/pub/v2/verifications/new123",
+            })
+        if path.endswith("/verifications/new123"):
+            return httpx.Response(503, json={"errorCode": "SERVICE_UNAVAILABLE"})
+        raise AssertionError((req.method, path))
+
+    async with httpx.AsyncClient(transport=httpx.MockTransport(reply)) as client:
+        p = TextVerifiedSms(client)
+        with pytest.raises(AmbiguousPurchase, match="manual review"):
+            await p.buy_number("telegram", "us", Decimal("1"))
+        # The chargeable POST must not be retried or misrepresented as a failed buy.
+        assert posts == 1
+
+
+def test_textverified_settings_must_be_exact_usd(monkeypatch):
+    monkeypatch.setattr(settings, "provider_name", "textverified")
+    monkeypatch.setattr(settings, "wallet_currency", "USD")
+    monkeypatch.setattr(settings, "provider_price_to_wallet", Decimal("1"))
+    monkeypatch.setattr(settings, "live_purchases_enabled", True)
+    assert settings.provider_credentials_ready and settings.live_ready
+    monkeypatch.setattr(settings, "provider_price_to_wallet", Decimal("2"))
+    assert not settings.live_ready
+    monkeypatch.setattr(settings, "provider_price_to_wallet", Decimal("1"))
+    monkeypatch.setattr(settings, "wallet_currency", "NGN")
+    assert not settings.live_ready
