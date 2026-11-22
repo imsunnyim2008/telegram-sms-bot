@@ -11,6 +11,7 @@ from sqlalchemy import func, select
 from .business import BotError
 from .config import settings
 from .country_ui import arrange_country_offers, country_flag
+from .command_menu import PUBLIC_HELP, ADMIN_HELP
 from .db import Activation, Session, Setting, User
 from .ledger import InsufficientFunds, apply
 
@@ -35,6 +36,29 @@ MAIN = keyboard([
     [('💳 Top up', 'topup'), ('📋 My orders', 'orders')],
     [('❓ Help', 'help')],
 ])
+
+MAIN_ADMIN = keyboard([
+    [('📱 Buy number', 'services:0'), ('💰 Balance', 'balance')],
+    [('💳 Top up', 'topup'), ('📋 My orders', 'orders')],
+    [('❓ Help', 'help')],
+    [('⚙️ Admin Settings', 'admin:settings')],
+])
+
+
+def main_menu_for(uid: int) -> InlineKeyboardMarkup:
+    return MAIN_ADMIN if uid in settings.admins else MAIN
+
+
+def admin_settings_keyboard() -> InlineKeyboardMarkup:
+    rows = []
+    if settings.public_base_url.startswith('https://'):
+        rows.append([InlineKeyboardButton(
+            text='💵 Open Price Manager',
+            web_app=WebAppInfo(url=settings.public_base_url.rstrip('/') + '/admin/pricing'),
+        )])
+    rows.append([InlineKeyboardButton(text='⬅️ Back to Main Menu', callback_data='admin:home')])
+    return InlineKeyboardMarkup(inline_keyboard=rows)
+
 TERMS = ('Terms: Buy only for accounts you own or are authorized to test. '
          'Respect the provider and destination platform rules. No fraud, impersonation, '
          'spam, bulk account creation or automated platform evasion. '
@@ -59,7 +83,23 @@ async def start(message: Message):
     elif not u.accepted_terms:
         await message.answer(TERMS, reply_markup=keyboard([[('✅ I accept', 'accept')]]))
     else:
-        await message.answer('Welcome! Choose an option:', reply_markup=MAIN)
+        await message.answer('Welcome! Choose an option:', reply_markup=main_menu_for(message.from_user.id))
+
+
+@router.message(Command('admin', ignore_case=True))
+async def admin_settings_command(message: Message):
+    uid = message.from_user.id
+    if uid not in settings.admins:
+        return await message.answer('Admin only')
+    if message.chat.type != 'private':
+        return await message.answer('Open Friday in a private chat to manage admin settings.')
+    await message.answer(ADMIN_HELP, reply_markup=admin_settings_keyboard())
+
+
+@router.message(Command('help', ignore_case=True))
+async def help_command(message: Message):
+    if await allowed(message.from_user.id, message):
+        await message.answer(PUBLIC_HELP, reply_markup=main_menu_for(message.from_user.id))
 
 
 async def remove_previous_menu(message) -> None:
@@ -108,7 +148,7 @@ async def callbacks(callback: CallbackQuery):
     if data == 'accept':
         await shop.ensure_user(uid, callback.from_user.username or '')
         await shop.accept_terms(uid)
-        await callback.message.answer('Accepted. Welcome!', reply_markup=MAIN)
+        await callback.message.answer('Accepted. Welcome!', reply_markup=main_menu_for(uid))
         return
     if not await allowed(uid, callback.message):
         return
@@ -159,9 +199,19 @@ async def callbacks(callback: CallbackQuery):
         elif data == 'orders':
             await show_orders(callback.message, uid)
         elif data == 'help':
-            await callback.message.answer('Choose Buy number, service, country and confirm. '
-                                          'Your code arrives here. /balance /orders /topup 5. '
-                                          'Use /start for the menu.')
+            await callback.message.answer(PUBLIC_HELP, reply_markup=main_menu_for(uid))
+        elif data == 'admin:settings':
+            if uid not in settings.admins:
+                await callback.message.answer('Admin only')
+            elif callback.message.chat.type != 'private':
+                await callback.message.answer('Open Friday in a private chat for admin settings.')
+            else:
+                await show_selection_menu(callback.message, ADMIN_HELP,
+                                          admin_settings_keyboard(), edit=True)
+        elif data == 'admin:home':
+            if uid in settings.admins:
+                await show_selection_menu(callback.message, 'Welcome! Choose an option:',
+                                          main_menu_for(uid), edit=True)
     except (BotError, ProviderErrorMessage) as exc:
         await callback.message.answer(str(exc))
     except (ValueError, IndexError):
@@ -233,7 +283,7 @@ async def countries(target, service: str, page: int = 0, *, edit: bool = False):
 
 async def show_balance(target, uid):
     user = await shop.get_user(uid)
-    await target.answer(f'Your balance: {user.balance} {settings.wallet_currency}', reply_markup=MAIN)
+    await target.answer(f'Your balance: {user.balance} {settings.wallet_currency}', reply_markup=main_menu_for(uid))
 
 
 async def show_orders(target, uid):
