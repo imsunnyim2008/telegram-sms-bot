@@ -17,6 +17,7 @@ from .gateway import CryptoBot
 from .nowpayments import NowPayments
 from .pricing_web import router as pricing_router
 from .handlers import router, set_shop
+from .command_menu import register_native_menu
 from .provider import FiveSim
 from .grizzly import GrizzlySms
 from .workers import Worker
@@ -78,6 +79,7 @@ async def lifespan(app: FastAPI):
         allowed_updates=dp.resolve_used_update_types(),
         max_connections=4,
     )
+    await register_native_menu(bot, settings.admins)
     tasks = [asyncio.create_task(worker.run())]
     log.info('Telegram signed webhook and SMS polling worker started')
     try:
