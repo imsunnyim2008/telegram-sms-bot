@@ -199,6 +199,8 @@ class Shop:
     async def start_payment(self, user_id: int, amount: Decimal) -> dict:
         if not settings.payment_ready:
             raise BotError('Online top-ups are not enabled yet')
+        if settings.payment_test_admin_only and user_id not in settings.admins:
+            raise BotError('Payments are in admin-only testing. Public top-ups are not open yet.')
         amount = amount.quantize(Decimal('.01'))
         if not settings.min_topup <= amount <= settings.max_topup:
             raise BotError(f'Top-up must be {settings.min_topup} to {settings.max_topup} {settings.wallet_currency}')
