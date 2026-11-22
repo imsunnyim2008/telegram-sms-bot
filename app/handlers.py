@@ -343,6 +343,37 @@ async def admin_testall(message: Message):
     await message.answer('\n'.join(lines))
 
 
+@router.message(Command('reconcilepayment'))
+async def admin_reconcile_nowpayment(message: Message):
+    """Recover a verified finished top-up when an IPN was lost or rejected."""
+    if not admin_only(message):
+        return await message.answer('Admin only')
+    if settings.payment_provider != 'nowpayments':
+        return await message.answer('NOWPayments is not selected')
+    try:
+        parts = message.text.split()
+        if len(parts) != 2 or not parts[1].isascii() or not parts[1].isdigit() or len(parts[1]) > 40:
+            return await message.answer('Usage: /reconcilepayment PAYMENT_ID')
+        payment_id = parts[1]
+        remote = await shop.gateway.get_payment_status(payment_id)
+        status = str(remote.get('payment_status', 'unknown')).lower()
+        if status != 'finished':
+            return await message.answer(f'NOWPayments payment status: {status}. Wallet unchanged.')
+        order_id = remote.get('order_id')
+        if not isinstance(order_id, str) or not order_id.startswith('friday-topup-'):
+            return await message.answer('Payment does not match a Friday invoice. Wallet unchanged.')
+        invoice_id = remote.get('invoice_id')
+        invoice_id = str(invoice_id) if invoice_id is not None else None
+        credited = await shop.verify_and_credit_nowpayments(
+            invoice_id, payment_id, order_id=order_id)
+        await message.answer(
+            'Payment confirmed and wallet credited once.' if credited
+            else 'Payment already credited or payment details failed strict matching. Check /testall.')
+    except Exception:
+        # Never log credentials or raw payment details to the Telegram conversation.
+        await message.answer('Unable to reconcile payment securely. Check Render error logs.')
+
+
 @router.message(Command('adjust'))
 async def admin_adjust(message: Message):
     if not admin_only(message):
