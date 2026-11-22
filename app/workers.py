@@ -60,7 +60,8 @@ class Worker:
                 return
             status, oid, user_id, expires = row.status, row.provider_order_id, row.user_id, aware(row.expires_at)
             created, notified, code = aware(row.created_at), row.sms_notified, row.code
-            service = row.service
+            service, provider_name = row.service, row.provider
+            provider = self.shop.provider_for(provider_name)
         if status == 'manual_review':
             await self.shop.reconcile(aid)
             async with Session.begin() as s:
@@ -69,12 +70,13 @@ class Worker:
                     row.next_poll_at = utcnow() + timedelta(seconds=60)
             return
         if status == 'received':
-            await self.deliver_and_finish(aid, user_id, oid, code, notified, service)
+            await self.deliver_and_finish(aid, user_id, oid, code, notified, service,
+                                          provider_name)
             return
         if status != 'pending' or oid is None:
             return
         try:
-            result = await self.shop.provider.check(oid)
+            result = await provider.check(oid)
         except ProviderError:
             return
         sms = result.get('sms') or []
@@ -88,7 +90,8 @@ class Worker:
                     row.code = received_code[:100]
                     row.status = 'received'
                     row.next_poll_at = utcnow()
-            await self.deliver_and_finish(aid, user_id, oid, received_code, False, service)
+            await self.deliver_and_finish(aid, user_id, oid, received_code, False,
+                                          service, provider_name)
             return
         if provider_status in {'CANCELED', 'CANCELLED', 'EXPIRED', 'TIMEOUT', 'BANNED'}:
             outcome = 'expired' if provider_status in {'EXPIRED', 'TIMEOUT'} else 'cancelled'
@@ -97,7 +100,7 @@ class Worker:
             return
         if utcnow() >= expires:
             try:
-                res = await self.shop.provider.cancel(oid)
+                res = await provider.cancel(oid)
                 if str(res.get('status', '')).upper() in {'CANCELED', 'CANCELLED'}:
                     if await self.shop.refund(aid, 'expired'):
                         await self.shop.notifier.send(user_id, f'Order #{aid} expired. Full refund issued.')
@@ -111,7 +114,8 @@ class Worker:
                 if row and row.status == 'pending':
                     row.next_poll_at = utcnow() + timedelta(seconds=interval)
 
-    async def deliver_and_finish(self, aid, user_id, oid, code, notified, service=''):
+    async def deliver_and_finish(self, aid, user_id, oid, code, notified,
+                                 service='', provider_name=None):
         if not notified:
             try:
                 await self.shop.notifier.send(
@@ -128,7 +132,8 @@ class Worker:
                 if row and row.status == 'received':
                     row.sms_notified = True
         try:
-            response = await self.shop.provider.finish(oid)
+            provider = self.shop.provider_for(provider_name or settings.provider_name)
+            response = await provider.finish(oid)
             if str(response.get('status', '')).upper() not in {'FINISHED', 'RECEIVED'}:
                 return
         except ProviderError:
@@ -177,7 +182,7 @@ class Worker:
                 row.phone = None
 
     async def low_balance_alert(self):
-        if not settings.provider_api_key:
+        if not settings.provider_credentials_ready:
             return
         try:
             balance = await self.shop.provider.get_balance()
