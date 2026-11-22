@@ -1,6 +1,5 @@
 """Webhook auth, deduplication, and SMS recovery without live external APIs."""
 import hashlib
-import json
 from decimal import Decimal
 
 import httpx
