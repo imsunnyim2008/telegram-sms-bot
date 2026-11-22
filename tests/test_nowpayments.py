@@ -153,3 +153,24 @@ def test_signature_bad_ipn_secret_is_denied(monkeypatch):
     body = json.dumps(event, sort_keys=True, separators=(',', ':')).encode()
     signature = hmac.new(b'actual-provider-secret', body, hashlib.sha512).hexdigest()
     assert not NowPayments.verify_webhook(json.dumps(event).encode(), signature)
+
+
+
+def test_signature_matches_javascript_float_normalization(monkeypatch):
+    """JS signs 0.0 as 0; Python normally serializes float as 0.0."""
+    monkeypatch.setattr(settings, 'nowpayments_ipn_secret', 'mock-ipn')
+    from app.nowpayments import canonical_json, js_normalize_numbers
+    event = {'payment_id': 123456, 'fee': {'serviceFee': 0.0,
+             'withdrawalFee': 1.0}, 'price_amount': 5.0}
+    raw = json.dumps(event).encode()
+    canonical = json.dumps(js_normalize_numbers(canonical_json(event)),
+                           separators=(',', ':'), ensure_ascii=False).encode()
+    signature = hmac.new(b'mock-ipn', canonical, hashlib.sha512).hexdigest()
+    assert NowPayments.verify_webhook(raw, signature)
+
+
+def test_signature_can_verify_exact_signed_body(monkeypatch):
+    monkeypatch.setattr(settings, 'nowpayments_ipn_secret', 'mock-ipn')
+    raw = b'{"payment_id":123,"invoice_id":234}'
+    signature = hmac.new(b'mock-ipn', raw, hashlib.sha512).hexdigest()
+    assert NowPayments.verify_webhook(raw, signature)
