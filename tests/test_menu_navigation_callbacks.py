@@ -1,5 +1,6 @@
 """Interactive menus should edit their existing Telegram card, not spam a new one."""
 from decimal import Decimal
+from datetime import datetime, timedelta, timezone
 from types import SimpleNamespace
 
 import pytest
@@ -81,6 +82,7 @@ async def test_order_refresh_keeps_check_cancel_buttons_in_single_card(setup_dat
         db.add(Activation(
             user_id=99, service="telegram", country="12",
             status="manual_review", phone="15557778888",
+            expires_at=datetime.now(timezone.utc) + timedelta(minutes=15),
             cost_provider=Decimal("0.45"), price_charged=Decimal("0.95"),
         ))
     async with session() as db:
