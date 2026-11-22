@@ -60,6 +60,19 @@ async def start(message: Message):
         await message.answer('Welcome! Choose an option:', reply_markup=MAIN)
 
 
+async def remove_previous_menu(message) -> None:
+    """Remove a completed selection/confirmation card without failing a purchase.
+
+    A Telegram message may be too old, already removed, or inaccessible.
+    The next screen is sent first; cleanup must not trigger another purchase.
+    """
+    try:
+        await message.delete()
+    except Exception:
+        # Deletion is cosmetic; never mistake it for a failed paid transaction.
+        pass
+
+
 @router.callback_query()
 async def callbacks(callback: CallbackQuery):
     # Answer immediately; lengthy provider calls happen AFTER Telegram acknowledgement.
@@ -89,6 +102,8 @@ async def callbacks(callback: CallbackQuery):
                 reply_markup=keyboard([[('✅ Confirm purchase', f'buy:{service}:{country}')],
                                        [('⬅️ Back', f'countries:{service}:0')]]),
             )
+            # The country list is no longer needed after a country is selected.
+            await remove_previous_menu(callback.message)
         elif data.startswith('buy:'):
             _, service, country = data.split(':')
             order = await shop.buy(uid, service, country)
@@ -100,6 +115,8 @@ async def callbacks(callback: CallbackQuery):
                 reply_markup=keyboard([[('🔄 Check SMS now', f'check:{order.id}')],
                                        [('❌ Cancel order', f'cancel:{order.id}')]]),
             )
+            # Keep the new order receipt; remove the stale confirm-purchase card.
+            await remove_previous_menu(callback.message)
         elif data.startswith('check:'):
             await check_sms(callback.message, uid, int(data.split(':')[1]))
         elif data.startswith('cancel:'):
