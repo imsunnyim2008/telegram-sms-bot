@@ -220,9 +220,15 @@ class Shop:
             raise BotError('Online top-ups are not enabled yet')
         if settings.payment_test_admin_only and user_id not in settings.admins:
             raise BotError('Payments are in admin-only testing. Public top-ups are not open yet.')
+        # Validate BEFORE rounding. A deposit of $4.999 must never round up
+        # to the minimum $5 and create a chargeable payment invoice.
+        if not amount.is_finite() or amount < settings.min_topup:
+            raise BotError(f'Minimum top-up is ${settings.min_topup}. Please enter ${settings.min_topup} or more.')
+        if amount > settings.max_topup:
+            raise BotError(f'Maximum top-up is ${settings.max_topup}.')
+        if amount.as_tuple().exponent < -2:
+            raise BotError('Enter an amount with at most 2 decimal places.')
         amount = amount.quantize(Decimal('.01'))
-        if not settings.min_topup <= amount <= settings.max_topup:
-            raise BotError(f'Top-up must be {settings.min_topup} to {settings.max_topup} {settings.wallet_currency}')
         async with Session.begin() as s:
             user = await s.get(User, user_id)
             if not user or user.is_banned or not user.accepted_terms:

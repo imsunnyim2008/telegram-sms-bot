@@ -1,11 +1,13 @@
 """Inline-keyboard Telegram UI. No financial operations live inside callbacks."""
 import asyncio
+import json
+import time
 from decimal import Decimal, InvalidOperation
 
-from aiogram import Router
+from aiogram import F, Router
 from aiogram.exceptions import TelegramBadRequest
 from aiogram.filters import Command, CommandStart
-from aiogram.types import CallbackQuery, InlineKeyboardButton, InlineKeyboardMarkup, Message, WebAppInfo
+from aiogram.types import CallbackQuery, InlineKeyboardButton, InlineKeyboardMarkup, Message
 from sqlalchemy import func, select
 
 from .business import BotError
@@ -50,14 +52,10 @@ def main_menu_for(uid: int) -> InlineKeyboardMarkup:
 
 
 def admin_settings_keyboard() -> InlineKeyboardMarkup:
-    rows = []
-    if settings.public_base_url.startswith('https://'):
-        rows.append([InlineKeyboardButton(
-            text='💵 Open Price Manager',
-            web_app=WebAppInfo(url=settings.public_base_url.rstrip('/') + '/admin/pricing'),
-        )])
-    rows.append([InlineKeyboardButton(text='⬅️ Back to Main Menu', callback_data='admin:home')])
-    return InlineKeyboardMarkup(inline_keyboard=rows)
+    return keyboard([
+        [('💵 Change Public Prices', 'ps:services:0')],
+        [('⬅️ Back to Main Menu', 'admin:home')],
+    ])
 
 TERMS = ('Terms: Buy only for accounts you own or are authorized to test. '
          'Respect the provider and destination platform rules. No fraud, impersonation, '
@@ -195,11 +193,32 @@ async def callbacks(callback: CallbackQuery):
         elif data == 'balance':
             await show_balance(callback.message, uid)
         elif data == 'topup':
-            await callback.message.answer(f'Top-up: send /topup 5 (amount in {settings.wallet_currency}).')
+            await prompt_topup(callback.message, uid)
         elif data == 'orders':
             await show_orders(callback.message, uid)
         elif data == 'help':
             await callback.message.answer(PUBLIC_HELP, reply_markup=main_menu_for(uid))
+        elif data.startswith('ps:'):
+            if uid not in settings.admins or callback.message.chat.type != 'private':
+                await callback.message.answer('Admin only')
+            else:
+                parts = data.split(':')
+                if parts[1] == 'services' and len(parts) == 3:
+                    await admin_price_services(callback.message, int(parts[2]), edit=True)
+                elif parts[1] == 'countries' and len(parts) == 4:
+                    await admin_price_countries(callback.message, parts[2],
+                                                int(parts[3]), edit=True)
+                elif parts[1] == 'set' and len(parts) == 4:
+                    await admin_price_prompt(callback.message, uid, parts[2], parts[3])
+                    await remove_previous_menu(callback.message)
+                elif parts[1] == 'reset' and len(parts) == 4:
+                    await admin_price_reset(callback.message, parts[2], parts[3])
+                else:
+                    await callback.message.answer('Invalid selection. Use /setprice.')
+        elif data == 'clear:confirm':
+            await clear_chat_confirm(callback.message, uid)
+        elif data == 'clear:cancel':
+            await remove_previous_menu(callback.message)
         elif data == 'admin:settings':
             if uid not in settings.admins:
                 await callback.message.answer('Admin only')
@@ -281,9 +300,178 @@ async def countries(target, service: str, page: int = 0, *, edit: bool = False):
     await show_selection_menu(target, f'Select a country for {service}:',
                               keyboard(rows), edit=edit)
 
+# The last step of a pricing or wallet wizard survives Render restarts.
+# Never keep prices or financial flows only in an in-memory dict.
+_FLOW_TIMEOUT = 15 * 60
+
+
+def flow_key(uid: int) -> str:
+    return f'flow:{uid}'
+
+
+async def save_flow(uid: int, flow: dict):
+    payload = {**flow, 'expires': int(time.time()) + _FLOW_TIMEOUT}
+    async with Session.begin() as s:
+        row = await s.get(Setting, flow_key(uid))
+        if row:
+            row.value = json.dumps(payload)
+        else:
+            s.add(Setting(key=flow_key(uid), value=json.dumps(payload)))
+
+
+async def read_flow(uid: int) -> dict | None:
+    async with Session() as s:
+        row = await s.get(Setting, flow_key(uid))
+    if not row:
+        return None
+    try:
+        value = json.loads(row.value)
+        if isinstance(value, dict) and int(value.get('expires', 0)) >= int(time.time()):
+            return value
+    except (ValueError, TypeError):
+        pass
+    return None
+
+
+async def clear_flow(uid: int):
+    async with Session.begin() as s:
+        row = await s.get(Setting, flow_key(uid))
+        if row:
+            await s.delete(row)
+
+
+def _pages(items, page: int, size: int = 8):
+    page = max(0, min(page, max(0, (len(items) - 1) // size)))
+    return page, items[page * size:(page + 1) * size]
+
+
+async def admin_price_services(target, page: int = 0, *, edit: bool = False):
+    prices = [p for p in await shop.provider.get_prices()
+              if settings.service_allowed(p.service) and settings.country_allowed(p.country)]
+    available = {p.service for p in prices}
+    popular = ['telegram', 'whatsapp', 'google', 'facebook', 'instagram',
+               'discord', 'amazon', 'microsoft']
+    names = sorted(available, key=lambda s: (
+        0, popular.index(s)) if s in popular else (1, s))
+    page, chunk = _pages(names, page)
+    rows = [[(name.title(), f'ps:countries:{name}:0')] for name in chunk]
+    nav = []
+    if page > 0:
+        nav.append(('⬅️ Prev', f'ps:services:{page - 1}'))
+    if (page + 1) * 8 < len(names):
+        nav.append(('Next ➡️', f'ps:services:{page + 1}'))
+    if nav:
+        rows.append(nav)
+    rows.append([('⬅️ Admin Settings', 'admin:settings')])
+    await show_selection_menu(
+        target, '💵 Change public price — Select a service:',
+        keyboard(rows), edit=edit,
+    )
+
+
+async def admin_price_countries(target, service: str, page: int = 0,
+                                *, edit: bool = False):
+    if not settings.service_allowed(service):
+        raise BotError('Service not available')
+    offers = [p for p in await shop.provider.get_prices() if
+              p.service == service and settings.country_allowed(p.country)]
+    names = (await shop.provider.get_country_names()
+             if hasattr(shop.provider, 'get_country_names') else {})
+    # Show only countries with live offers (never invent provider stock).
+    arranged = [(item, label, flag) for item, label, flag in
+                arrange_country_offers(offers, names) if item is not None]
+    page, chunk = _pages(arranged, page)
+    rows = []
+    for item, name, flag in chunk:
+        # ADMIN sees the same public price as a buyer; no raw provider cost.
+        public_price = await shop.price(item)
+        rows.append([(f'{flag} {name} • ${public_price} USD',
+                      f'ps:set:{service}:{item.country}')])
+    nav = []
+    if page > 0:
+        nav.append(('⬅️ Prev', f'ps:countries:{service}:{page - 1}'))
+    if (page + 1) * 8 < len(arranged):
+        nav.append(('Next ➡️', f'ps:countries:{service}:{page + 1}'))
+    if nav:
+        rows.append(nav)
+    rows.append([('⬅️ Services', 'ps:services:0')])
+    await show_selection_menu(
+        target, f'💵 Change public price — {service.title()}\nChoose a country:',
+        keyboard(rows), edit=edit,
+    )
+
+
+async def admin_price_prompt(target, uid: int, service: str, country: str):
+    if uid not in settings.admins:
+        raise BotError('Admin only')
+    item, current = await shop.quote(service, country)
+    names = (await shop.provider.get_country_names()
+             if hasattr(shop.provider, 'get_country_names') else {})
+    name = names.get(country, f'Country #{country}')
+    await save_flow(uid, {'type': 'price', 'service': service, 'country': country})
+    await target.answer(
+        f'✏️ SET PUBLIC SELLING PRICE\n'
+        f'Service: {service.title()}\nCountry: {country_flag(name)} {name}\n'
+        f'Current public price: ${current} USD\n\n'
+        'Send your NEW public price in USD (example: 0.90).\n'
+        'Customers will only see your selling price, not the provider cost.\n'
+        'Their wallet will be debited this selling price when they purchase.\n'
+        'To cancel, send /cancel.'
+    )
+
+
+async def admin_price_reset(target, service: str, country: str):
+    if not settings.service_allowed(service) or not settings.country_allowed(country):
+        raise BotError('Invalid price selection')
+    async with Session.begin() as s:
+        row = await s.get(Setting, f'price:{service}:{country}')
+        if row:
+            await s.delete(row)
+    await target.answer('✅ Custom public price reset. Global markup will apply to new purchases.')
+
+
+async def admin_price_save(target, uid: int, flow: dict, raw: str):
+    service, country = flow['service'], flow['country']
+    if uid not in settings.admins:
+        return
+    try:
+        value = Decimal(raw.strip().replace(chr(36), '', 1))
+        if not value.is_finite() or not (0 < value <= 1000) or value.as_tuple().exponent < -4:
+            raise ValueError()
+    except (ValueError, InvalidOperation):
+        await target.answer('Enter a valid USD price, e.g. 0.90 (up to 4 decimal places).')
+        return
+    item, _ = await shop.quote(service, country)
+    from .business import Q
+    from decimal import ROUND_UP
+    floor = (item.cost * settings.provider_price_to_wallet).quantize(Q, rounding=ROUND_UP)
+    if value < floor:
+        await target.answer(f'Price too low. Minimum allowed: {floor} USD. Send a higher price.')
+        return
+    value = value.quantize(Q)
+    async with Session.begin() as s:
+        key = f'price:{service}:{country}'
+        row = await s.get(Setting, key)
+        if row:
+            row.value = str(value)
+        else:
+            s.add(Setting(key=key, value=str(value)))
+    await clear_flow(uid)
+    await target.answer(
+        f'PUBLIC PRICE SAVED!\n{service.title()} / Country #{country}: {value} USD\n'
+        'Buyers see only your selling price, which is debited from their wallet at purchase.',
+        reply_markup=keyboard([
+            [('Change Another Price', 'ps:services:0')],
+            [('Reset This Price', f'ps:reset:{service}:{country}')],
+            [('Admin Settings', 'admin:settings')],
+        ]),
+    )
+
+
 async def show_balance(target, uid):
     user = await shop.get_user(uid)
-    await target.answer(f'Your balance: {user.balance} {settings.wallet_currency}', reply_markup=main_menu_for(uid))
+    await target.answer(f'Your balance: {user.balance} {settings.wallet_currency}',
+                        reply_markup=main_menu_for(uid))
 
 
 async def show_orders(target, uid):
@@ -302,24 +490,15 @@ async def show_orders(target, uid):
     await target.answer('\n'.join(lines))
 
 
-@router.message(Command('pricing', 'prices', ignore_case=True))
+@router.message(Command('pricing', 'prices', 'setprice', 'changeprice', ignore_case=True))
 async def admin_pricing_command(message: Message):
-    """Open the protected live-pricing website inside Telegram."""
+    """Manage public prices directly inside Telegram, without any Mini App."""
     uid = message.from_user.id
     if uid not in settings.admins:
         return await message.answer('Admin only')
     if message.chat.type != 'private':
-        return await message.answer('Open our private bot chat, then send /pricing.')
-    if not settings.public_base_url.startswith('https://'):
-        return await message.answer('Admin pricing URL is not configured yet.')
-    url = settings.public_base_url.rstrip('/') + '/admin/pricing'
-    await message.answer(
-        '💵 Friday Price Manager\nSet a global markup or set/reset an exact price '
-        'for each service and country. Changes take effect on the next quote.',
-        reply_markup=InlineKeyboardMarkup(inline_keyboard=[[
-            InlineKeyboardButton(text='📊 Open Price Manager', web_app=WebAppInfo(url=url))
-        ]]),
-    )
+        return await message.answer('Use /setprice in your private Friday chat.')
+    await admin_price_services(message)
 
 
 @router.message(Command('buy'))
@@ -389,28 +568,54 @@ async def orders_command(message: Message):
         await show_orders(message, message.from_user.id)
 
 
-@router.message(Command('topup'))
+async def send_topup_invoice(target, uid: int, raw: str) -> bool:
+    try:
+        amount = Decimal(raw.strip())
+        if not amount.is_finite():
+            raise InvalidOperation()
+        # Shop enforces $5 minimum before rounding for EVERY user.
+        invoice = await shop.start_payment(uid, amount)
+    except (ValueError, InvalidOperation):
+        await target.answer(f'Enter a valid amount in USD. Minimum top-up: ${settings.min_topup}.')
+        return False
+    except BotError as exc:
+        await target.answer(str(exc))
+        return False
+    await clear_flow(uid)
+    await target.answer(
+        f'💳 Invoice for ${invoice["amount"]} USD. '
+        'Pay using the official link below; your wallet credits after confirmation.',
+        reply_markup=InlineKeyboardMarkup(inline_keyboard=[[
+            InlineKeyboardButton(text=('Pay via NOWPayments'
+                if settings.payment_provider == 'nowpayments' else 'Pay via Crypto Bot'),
+                url=invoice['url']),
+        ]]),
+    )
+    return True
+
+
+async def prompt_topup(target, uid: int):
+    if hasattr(target, 'chat') and target.chat.type != 'private':
+        return await target.answer('Open Friday in a private chat to top up.')
+    await save_flow(uid, {'type': 'topup'})
+    await target.answer(
+        f'💳 Enter the amount you want to top up (USD).\n'
+        f'✅ Minimum deposit: ${settings.min_topup}\n'
+        f'❌ Amounts below ${settings.min_topup} will be rejected.\n\n'
+        'Type an amount such as 5, 10, or 20 and send it.'
+    )
+
+
+@router.message(Command('topup', ignore_case=True))
 async def topup_command(message: Message):
     uid = message.from_user.id
     if not await allowed(uid, message):
         return
-    try:
-        _, raw = message.text.split(maxsplit=1)
-        amount = Decimal(raw.strip())
-        if not amount.is_finite():
-            raise ValueError()
-        invoice = await shop.start_payment(uid, amount)
-    except (ValueError, InvalidOperation, BotError) as exc:
-        await message.answer(str(exc) if isinstance(exc, BotError)
-                             else f'Usage: /topup 5 (amount in {settings.wallet_currency})')
-        return
-    await message.answer(
-        f'Invoice for {invoice["amount"]} {settings.wallet_currency}. '
-        'Only pay via the gateway link below. Your wallet credits after confirmed payment.',
-        reply_markup=InlineKeyboardMarkup(inline_keyboard=[[
-            InlineKeyboardButton(text=('Pay via NOWPayments' if settings.payment_provider == 'nowpayments' else 'Pay via Crypto Bot'), url=invoice['url']),
-        ]]),
-    )
+    parts = (message.text or '').split(maxsplit=1)
+    if len(parts) == 1:
+        await prompt_topup(message, uid)
+    else:
+        await send_topup_invoice(message, uid, parts[1])
 
 
 def admin_only(message: Message) -> bool:
@@ -674,3 +879,79 @@ async def admin_resolve(message: Message):
             await message.answer('Order was already resolved')
     except (IndexError, ValueError):
         await message.answer('Usage: /resolve ORDER_ID refund (manual review only)')
+
+@router.message(Command('cancel', ignore_case=True))
+async def cancel_flow_command(message: Message):
+    await clear_flow(message.from_user.id)
+    await message.answer('Cancelled. Use /start to open the menu.')
+
+
+@router.message(Command('clear', ignore_case=True))
+async def clear_chat_command(message: Message):
+    if message.chat.type != 'private':
+        return await message.answer('Chat cleanup is available only in a private chat.')
+    await message.answer(
+        '🧹 Clear Friday chat?\n'
+        'This deletes recent Telegram messages from this private chat, '
+        'including messages containing verification codes.\n'
+        'Telegram bots cannot delete messages older than 48 hours or guarantee '
+        'removal of the entire history. Your wallet and orders are NOT deleted.\n'
+        'For a complete history wipe, use Telegram > Clear History.',
+        reply_markup=keyboard([
+            [('🗑️ Yes, clear recent messages', 'clear:confirm')],
+            [('Cancel', 'clear:cancel')],
+        ]),
+    )
+
+
+async def clear_chat_confirm(target, uid: int):
+    if not hasattr(target, 'chat') or target.chat.type != 'private' or target.chat.id != uid:
+        await target.answer('Chat cleanup is only available in your own private chat.')
+        return
+    # Telegram's deleteMessages API accepts at most 100 IDs at a time,
+    # and messages over 48h old cannot be deleted. Scan up to 500 recent IDs.
+    last = target.message_id
+    errors = 0
+    for _ in range(5):
+        if last <= 0:
+            break
+        first = max(1, last - 99)
+        try:
+            await target.bot.delete_messages(
+                chat_id=uid, message_ids=list(range(first, last + 1)))
+        except Exception:
+            errors += 1
+        last = first - 1
+    await clear_flow(uid)
+    if errors:
+        await target.answer(
+            '🧹 Tried clearing recent messages. Some older or protected messages '
+            'could not be removed. For the entire chat, use Telegram > Clear History.'
+        )
+    # If all delete requests succeeded, leave the chat empty.
+
+
+@router.message(F.text)
+async def handle_pending_text(message: Message):
+    # Only input explicitly requested by this bot is interpreted as an amount.
+    # Do not process random texts, group messages, or bot commands as payment input.
+    if message.chat.type != 'private' or not message.from_user:
+        return
+    raw = (message.text or '').strip()
+    if not raw or raw.startswith('/'):
+        return
+    uid = message.from_user.id
+    flow = await read_flow(uid)
+    if not flow:
+        return
+    if flow.get('type') == 'topup':
+        if await allowed(uid, message):
+            await send_topup_invoice(message, uid, raw)
+    elif flow.get('type') == 'price':
+        if uid not in settings.admins:
+            await clear_flow(uid)
+            return await message.answer('Admin only')
+        try:
+            await admin_price_save(message, uid, flow, raw)
+        except BotError as exc:
+            await message.answer(str(exc))
