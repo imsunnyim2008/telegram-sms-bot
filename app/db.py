@@ -86,6 +86,13 @@ class TelegramUpdateReceipt(Base):
     processed_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utcnow)
 
 
+class TextVerifiedWebhookReceipt(Base):
+    """HMAC-authenticated event deduplication without storing SMS or OTP."""
+    __tablename__ = 'textverified_webhook_receipts'
+    key: Mapped[str] = mapped_column(String(64), primary_key=True)
+    processed_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utcnow)
+
+
 class Setting(Base):
     __tablename__ = 'settings'
     key: Mapped[str] = mapped_column(String(80), primary_key=True)
