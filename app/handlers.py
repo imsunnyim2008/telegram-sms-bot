@@ -5,7 +5,7 @@ from decimal import Decimal, InvalidOperation
 from aiogram import Router
 from aiogram.exceptions import TelegramBadRequest
 from aiogram.filters import Command, CommandStart
-from aiogram.types import CallbackQuery, InlineKeyboardButton, InlineKeyboardMarkup, Message
+from aiogram.types import CallbackQuery, InlineKeyboardButton, InlineKeyboardMarkup, Message, WebAppInfo
 from sqlalchemy import func, select
 
 from .business import BotError
@@ -51,7 +51,7 @@ async def allowed(uid: int, target) -> bool:
     return True
 
 
-@router.message(CommandStart())
+@router.message(CommandStart(ignore_case=True))
 async def start(message: Message):
     u = await shop.ensure_user(message.from_user.id, message.from_user.username or '')
     if u.is_banned:
@@ -250,6 +250,26 @@ async def show_orders(target, uid):
         lines.append(f'#{row.id} {row.service} / {row.country}: {row.status} • {number} • '
                      f'{row.price_charged} {settings.wallet_currency} • /check {row.id}')
     await target.answer('\n'.join(lines))
+
+
+@router.message(Command('pricing', 'prices', ignore_case=True))
+async def admin_pricing_command(message: Message):
+    """Open the protected live-pricing website inside Telegram."""
+    uid = message.from_user.id
+    if uid not in settings.admins:
+        return await message.answer('Admin only')
+    if message.chat.type != 'private':
+        return await message.answer('Open our private bot chat, then send /pricing.')
+    if not settings.public_base_url.startswith('https://'):
+        return await message.answer('Admin pricing URL is not configured yet.')
+    url = settings.public_base_url.rstrip('/') + '/admin/pricing'
+    await message.answer(
+        '💵 Friday Price Manager\nSet a global markup or set/reset an exact price '
+        'for each service and country. Changes take effect on the next quote.',
+        reply_markup=InlineKeyboardMarkup(inline_keyboard=[[
+            InlineKeyboardButton(text='📊 Open Price Manager', web_app=WebAppInfo(url=url))
+        ]]),
+    )
 
 
 @router.message(Command('buy'))

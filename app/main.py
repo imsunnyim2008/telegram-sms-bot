@@ -15,6 +15,7 @@ from .config import settings
 from .db import engine, init_db, Session, TelegramUpdateReceipt
 from .gateway import CryptoBot
 from .nowpayments import NowPayments
+from .pricing_web import router as pricing_router
 from .handlers import router, set_shop
 from .provider import FiveSim
 from .grizzly import GrizzlySms
@@ -93,6 +94,7 @@ async def lifespan(app: FastAPI):
 
 
 web = FastAPI(lifespan=lifespan, docs_url=None, redoc_url=None, openapi_url=None)
+web.include_router(pricing_router)
 
 
 @web.get('/')
