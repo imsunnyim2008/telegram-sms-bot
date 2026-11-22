@@ -193,11 +193,32 @@ async def callbacks(callback: CallbackQuery):
         elif data == 'balance':
             await show_balance(callback.message, uid)
         elif data == 'topup':
-            await callback.message.answer(f'Top-up: send /topup 5 (amount in {settings.wallet_currency}).')
+            await prompt_topup(callback.message, uid)
         elif data == 'orders':
             await show_orders(callback.message, uid)
         elif data == 'help':
             await callback.message.answer(PUBLIC_HELP, reply_markup=main_menu_for(uid))
+        elif data.startswith('ps:'):
+            if uid not in settings.admins or callback.message.chat.type != 'private':
+                await callback.message.answer('Admin only')
+            else:
+                parts = data.split(':')
+                if parts[1] == 'services' and len(parts) == 3:
+                    await admin_price_services(callback.message, int(parts[2]), edit=True)
+                elif parts[1] == 'countries' and len(parts) == 4:
+                    await admin_price_countries(callback.message, parts[2],
+                                                int(parts[3]), edit=True)
+                elif parts[1] == 'set' and len(parts) == 4:
+                    await admin_price_prompt(callback.message, uid, parts[2], parts[3])
+                    await remove_previous_menu(callback.message)
+                elif parts[1] == 'reset' and len(parts) == 4:
+                    await admin_price_reset(callback.message, parts[2], parts[3])
+                else:
+                    await callback.message.answer('Invalid selection. Use /setprice.')
+        elif data == 'clear:confirm':
+            await clear_chat_confirm(callback.message, uid)
+        elif data == 'clear:cancel':
+            await remove_previous_menu(callback.message)
         elif data == 'admin:settings':
             if uid not in settings.admins:
                 await callback.message.answer('Admin only')
@@ -300,24 +321,15 @@ async def show_orders(target, uid):
     await target.answer('\n'.join(lines))
 
 
-@router.message(Command('pricing', 'prices', ignore_case=True))
+@router.message(Command('pricing', 'prices', 'setprice', 'changeprice', ignore_case=True))
 async def admin_pricing_command(message: Message):
-    """Open the protected live-pricing website inside Telegram."""
+    """Manage public prices directly inside Telegram, without any Mini App."""
     uid = message.from_user.id
     if uid not in settings.admins:
         return await message.answer('Admin only')
     if message.chat.type != 'private':
-        return await message.answer('Open our private bot chat, then send /pricing.')
-    if not settings.public_base_url.startswith('https://'):
-        return await message.answer('Admin pricing URL is not configured yet.')
-    url = settings.public_base_url.rstrip('/') + '/admin/pricing'
-    await message.answer(
-        '💵 Friday Price Manager\nSet a global markup or set/reset an exact price '
-        'for each service and country. Changes take effect on the next quote.',
-        reply_markup=InlineKeyboardMarkup(inline_keyboard=[[
-            InlineKeyboardButton(text='📊 Open Price Manager', web_app=WebAppInfo(url=url))
-        ]]),
-    )
+        return await message.answer('Use /setprice in your private Friday chat.')
+    await admin_price_services(message)
 
 
 @router.message(Command('buy'))
