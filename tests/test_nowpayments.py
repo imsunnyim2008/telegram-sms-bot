@@ -134,3 +134,22 @@ async def test_no_credit_for_wrong_order_or_unfinished(monkeypatch):
     async with sess() as s:
         assert (await s.get(User, 456)).balance == Decimal('0')
     await engine.dispose()
+
+
+
+def test_signature_top_level_sorted_with_nested_fee_order(monkeypatch):
+    """Support both HMAC formats referenced by the NOWPayments documentation."""
+    monkeypatch.setattr(settings, 'nowpayments_ipn_secret', 'mock-ipn')
+    event = {'payment_status': 'finished', 'fee': {'withdrawalFee': 0, 'depositFee': 0.1},
+             'payment_id': 777, 'invoice_id': 222}
+    top_sorted = json.dumps(dict(sorted(event.items())), separators=(',', ':')).encode()
+    signature = hmac.new(b'mock-ipn', top_sorted, hashlib.sha512).hexdigest()
+    assert NowPayments.verify_webhook(json.dumps(event).encode(), signature)
+
+
+def test_signature_bad_ipn_secret_is_denied(monkeypatch):
+    monkeypatch.setattr(settings, 'nowpayments_ipn_secret', 'different-secret')
+    event = {'payment_id': 333, 'invoice_id': 111}
+    body = json.dumps(event, sort_keys=True, separators=(',', ':')).encode()
+    signature = hmac.new(b'actual-provider-secret', body, hashlib.sha512).hexdigest()
+    assert not NowPayments.verify_webhook(json.dumps(event).encode(), signature)
