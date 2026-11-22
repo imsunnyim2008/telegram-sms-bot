@@ -3,12 +3,14 @@ import asyncio
 from decimal import Decimal, InvalidOperation
 
 from aiogram import Router
+from aiogram.exceptions import TelegramBadRequest
 from aiogram.filters import Command, CommandStart
 from aiogram.types import CallbackQuery, InlineKeyboardButton, InlineKeyboardMarkup, Message
 from sqlalchemy import func, select
 
 from .business import BotError
 from .config import settings
+from .country_ui import arrange_country_offers, country_flag
 from .db import Activation, Session, Setting, User
 from .ledger import InsufficientFunds, apply
 
@@ -73,12 +75,36 @@ async def remove_previous_menu(message) -> None:
         pass
 
 
+async def show_selection_menu(target, title: str, markup, *, edit: bool = False):
+    """Reuse the same Telegram message for *every* menu page and Back button.
+
+    Editing prevents previous country pages from stacking in chat. If Telegram
+    refuses to edit an old/inaccessible menu, send a fresh one and remove the
+    stale message; no purchase or wallet action happens in this helper.
+    """
+    if edit:
+        try:
+            return await target.edit_text(title, reply_markup=markup)
+        except TelegramBadRequest as exc:
+            if 'message is not modified' in str(exc).lower():
+                return
+        except (AttributeError, TypeError):
+            pass
+        new_menu = await target.answer(title, reply_markup=markup)
+        await remove_previous_menu(target)
+        return new_menu
+    return await target.answer(title, reply_markup=markup)
+
+
 @router.callback_query()
 async def callbacks(callback: CallbackQuery):
     # Answer immediately; lengthy provider calls happen AFTER Telegram acknowledgement.
-    await callback.answer()
     uid = callback.from_user.id
     data = callback.data or ''
+    if data.startswith('unavailable:'):
+        await callback.answer('No numbers in stock for this country and service.', show_alert=True)
+        return
+    await callback.answer()
     if data == 'accept':
         await shop.ensure_user(uid, callback.from_user.username or '')
         await shop.accept_terms(uid)
@@ -88,15 +114,17 @@ async def callbacks(callback: CallbackQuery):
         return
     try:
         if data.startswith('services:'):
-            await services(callback.message, int(data.split(':')[1]))
+            await services(callback.message, int(data.split(':')[1]), edit=True)
         elif data.startswith('countries:'):
             _, service, page = data.split(':')
-            await countries(callback.message, service, int(page))
+            await countries(callback.message, service, int(page), edit=True)
         elif data.startswith('preview:'):
             _, service, country = data.split(':')
             item, charge = await shop.quote(service, country)
+            names = await shop.provider.get_country_names() if hasattr(shop.provider, 'get_country_names') else {}
+            selected_country = names.get(country, f'Country #{country}')
             await callback.message.answer(
-                f'{service.title()} • {country.title()}\n'
+                f'{service.title()} • {country_flag(selected_country)} {selected_country}\n'
                 f'Available: {item.stock}\nTotal price: {charge} {settings.wallet_currency}\n'
                 'You are charged only if a code is received; no-code cancellations are refunded.',
                 reply_markup=keyboard([[('✅ Confirm purchase', f'buy:{service}:{country}')],
@@ -144,7 +172,7 @@ async def callbacks(callback: CallbackQuery):
 ProviderErrorMessage = BotError
 
 
-async def services(target, page: int = 0):
+async def services(target, page: int = 0, *, edit: bool = False):
     try:
         items = await shop.provider.get_prices()
     except Exception:
@@ -163,36 +191,43 @@ async def services(target, page: int = 0):
         nav.append(('Next ➡️', f'services:{page+1}'))
     if nav:
         rows.append(nav)
-    await target.answer(f'Choose a service ({len(names)} in stock):', reply_markup=keyboard(rows))
+    await show_selection_menu(target, f'Choose a service ({len(names)} in stock):',
+                              keyboard(rows), edit=edit)
 
 
-async def countries(target, service: str, page: int = 0):
+async def countries(target, service: str, page: int = 0, *, edit: bool = False):
     if not settings.service_allowed(service):
         raise BotError('Service disabled')
     items = [x for x in await shop.provider.get_prices() if x.service == service]
-    items.sort(key=lambda i: i.cost)
-    country_names = await shop.provider.get_country_names() if hasattr(shop.provider, 'get_country_names') else {}
-    page = max(0, min(page, max(0, (len(items) - 1) // 8)))
-    chunk = items[page * 8:(page + 1) * 8]
+    country_names = (await shop.provider.get_country_names()
+                     if hasattr(shop.provider, 'get_country_names') else {})
+    # The five preferred countries ALWAYS occupy the first five slots.
+    # Missing provider offers are labelled unavailable, never sold as stock.
+    arranged = arrange_country_offers(items, country_names)
+    page = max(0, min(page, max(0, (len(arranged) - 1) // 8)))
+    chunk = arranged[page * 8:(page + 1) * 8]
     rows = []
-    for x in chunk:
-        if settings.provider_price_to_wallet > 0:
-            price = f'{await shop.price(x)} {settings.wallet_currency}'
+    for item, label, flag in chunk:
+        if item is None:
+            rows.append([(f'{flag} {label} • out of stock',
+                          f'unavailable:{label.lower()}')])
         else:
-            price = 'price setup required'
-        display_country = country_names.get(x.country, f'Country #{x.country}')
-        rows.append([(f'{display_country} • {price} • {x.stock} left',
-                      f'preview:{service}:{x.country}')])
+            if settings.provider_price_to_wallet > 0:
+                price = f'{await shop.price(item)} {settings.wallet_currency}'
+            else:
+                price = 'price setup required'
+            rows.append([(f'{flag} {label} • {price} • {item.stock} left',
+                          f'preview:{service}:{item.country}')])
     nav = []
     if page:
         nav.append(('⬅️ Prev', f'countries:{service}:{page-1}'))
-    if len(items) > (page + 1) * 8:
+    if len(arranged) > (page + 1) * 8:
         nav.append(('Next ➡️', f'countries:{service}:{page+1}'))
     if nav:
         rows.append(nav)
     rows.append([('Back to services', 'services:0')])
-    await target.answer(f'Select a country for {service}:', reply_markup=keyboard(rows))
-
+    await show_selection_menu(target, f'Select a country for {service}:',
+                              keyboard(rows), edit=edit)
 
 async def show_balance(target, uid):
     user = await shop.get_user(uid)
