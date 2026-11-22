@@ -300,6 +300,592 @@ async def countries(target, service: str, page: int = 0, *, edit: bool = False):
     await show_selection_menu(target, f'Select a country for {service}:',
                               keyboard(rows), edit=edit)
 
+# The last step of a pricing or wallet wizard survives Render restarts.
+# Never keep prices or financial flows only in an in-memory dict.
+_FLOW_TIMEOUT = 15 * 60
+
+
+def flow_key(uid: int) -> str:
+    return f'flow:{uid}'
+
+
+async def save_flow(uid: int, flow: dict):
+    payload = {**flow, 'expires': int(time.time()) + _FLOW_TIMEOUT}
+    async with Session.begin() as s:
+        row = await s.get(Setting, flow_key(uid))
+        if row:
+            row.value = json.dumps(payload)
+        else:
+            s.add(Setting(key=flow_key(uid), value=json.dumps(payload)))
+
+
+async def read_flow(uid: int) -> dict | None:
+    async with Session() as s:
+        row = await s.get(Setting, flow_key(uid))
+    if not row:
+        return None
+    try:
+        value = json.loads(row.value)
+        if isinstance(value, dict) and int(value.get('expires', 0)) >= int(time.time()):
+            return value
+    except (ValueError, TypeError):
+        pass
+    return None
+
+
+async def clear_flow(uid: int):
+    async with Session.begin() as s:
+        row = await s.get(Setting, flow_key(uid))
+        if row:
+            await s.delete(row)
+
+
+def _pages(items, page: int, size: int = 8):
+    page = max(0, min(page, max(0, (len(items) - 1) // size)))
+    return page, items[page * size:(page + 1) * size]
+
+
+async def admin_price_services(target, page: int = 0, *, edit: bool = False):
+    prices = [p for p in await shop.provider.get_prices()
+              if settings.service_allowed(p.service) and settings.country_allowed(p.country)]
+    available = {p.service for p in prices}
+    popular = ['telegram', 'whatsapp', 'google', 'facebook', 'instagram',
+               'discord', 'amazon', 'microsoft']
+    names = sorted(available, key=lambda s: (
+        0, popular.index(s)) if s in popular else (1, s))
+    page, chunk = _pages(names, page)
+    rows = [[(name.title(), f'ps:countries:{name}:0')] for name in chunk]
+    nav = []
+    if page > 0:
+        nav.append(('⬅️ Prev', f'ps:services:{page - 1}'))
+    if (page + 1) * 8 < len(names):
+        nav.append(('Next ➡️', f'ps:services:{page + 1}'))
+    if nav:
+        rows.append(nav)
+    rows.append([('⬅️ Admin Settings', 'admin:settings')])
+    await show_selection_menu(
+        target, '💵 Change public price — Select a service:',
+        keyboard(rows), edit=edit,
+    )
+
+
+async def admin_price_countries(target, service: str, page: int = 0,
+                                *, edit: bool = False):
+    if not settings.service_allowed(service):
+        raise BotError('Service not available')
+    offers = [p for p in await shop.provider.get_prices() if
+              p.service == service and settings.country_allowed(p.country)]
+    names = (await shop.provider.get_country_names()
+             if hasattr(shop.provider, 'get_country_names') else {})
+    # Show only countries with live offers (never invent provider stock).
+    arranged = [(item, label, flag) for item, label, flag in
+                arrange_country_offers(offers, names) if item is not None]
+    page, chunk = _pages(arranged, page)
+    rows = []
+    for item, name, flag in chunk:
+        # ADMIN sees the same public price as a buyer; no raw provider cost.
+        public_price = await shop.price(item)
+        rows.append([(f'{flag} {name} • ${public_price} USD',
+                      f'ps:set:{service}:{item.country}')])
+    nav = []
+    if page > 0:
+        nav.append(('⬅️ Prev', f'ps:countries:{service}:{page - 1}'))
+    if (page + 1) * 8 < len(arranged):
+        nav.append(('Next ➡️', f'ps:countries:{service}:{page + 1}'))
+    if nav:
+        rows.append(nav)
+    rows.append([('⬅️ Services', 'ps:services:0')])
+    await show_selection_menu(
+        target, f'💵 Change public price — {service.title()}\nChoose a country:',
+        keyboard(rows), edit=edit,
+    )
+
+
+async def admin_price_prompt(target, uid: int, service: str, country: str):
+    if uid not in settings.admins:
+        raise BotError('Admin only')
+    item, current = await shop.quote(service, country)
+    names = (await shop.provider.get_country_names()
+             if hasattr(shop.provider, 'get_country_names') else {})
+    name = names.get(country, f'Country #{country}')
+    await save_flow(uid, {'type': 'price', 'service': service, 'country': country})
+    await target.answer(
+        f'✏️ SET PUBLIC SELLING PRICE\n'
+        f'Service: {service.title()}\nCountry: {country_flag(name)} {name}\n'
+        f'Current public price: ${current} USD\n\n'
+        'Send your NEW public price in USD (example: 0.90).\n'
+        'Customers will only see your selling price, not the provider cost.\n'
+        'Their wallet will be debited this selling price when they purchase.\n'
+        'To cancel, send /cancel.'
+    )
+
+
+async def admin_price_reset(target, service: str, country: str):
+    if not settings.service_allowed(service) or not settings.country_allowed(country):
+        raise BotError('Invalid price selection')
+    async with Session.begin() as s:
+        row = await s.get(Setting, f'price:{service}:{country}')
+        if row:
+            await s.delete(row)
+    await target.answer('✅ Custom public price reset. Global markup will apply to new purchases.')
+
+
+async def admin_price_save(target, uid: int, flow: dict, raw: str):
+    service, country = flow['service'], flow['country']
+    if uid not in settings.admins:
+        return
+    try:
+        value = Decimal(raw.strip().replace('
+    user = await shop.get_user(uid)
+    await target.answer(f'Your balance: {user.balance} {settings.wallet_currency}', reply_markup=main_menu_for(uid))
+
+
+async def show_orders(target, uid):
+    async with Session() as s:
+        orders = (await s.scalars(select(Activation).where(Activation.user_id == uid)
+                                  .order_by(Activation.id.desc()).limit(10))).all()
+    if not orders:
+        await target.answer('No orders yet.')
+        return
+    lines = []
+    for row in orders:
+        number = row.phone if row.status in ('pending', 'ordering', 'received') else (
+            '••••' + row.phone[-4:] if row.phone else 'hidden')
+        lines.append(f'#{row.id} {row.service} / {row.country}: {row.status} • {number} • '
+                     f'{row.price_charged} {settings.wallet_currency} • /check {row.id}')
+    await target.answer('\n'.join(lines))
+
+
+@router.message(Command('pricing', 'prices', 'setprice', 'changeprice', ignore_case=True))
+async def admin_pricing_command(message: Message):
+    """Manage public prices directly inside Telegram, without any Mini App."""
+    uid = message.from_user.id
+    if uid not in settings.admins:
+        return await message.answer('Admin only')
+    if message.chat.type != 'private':
+        return await message.answer('Use /setprice in your private Friday chat.')
+    await admin_price_services(message)
+
+
+@router.message(Command('buy'))
+async def buy_command(message: Message):
+    if await allowed(message.from_user.id, message):
+        await services(message)
+
+
+@router.message(Command('balance'))
+async def balance_command(message: Message):
+    if await allowed(message.from_user.id, message):
+        await show_balance(message, message.from_user.id)
+
+
+async def check_sms(target, user_id: int, activation_id: int) -> None:
+    """Owner-only, on-demand provider lookup when the free server was asleep."""
+    if activation_id <= 0:
+        await target.answer('Invalid order number.')
+        return
+    async with Session() as s:
+        row = await s.get(Activation, activation_id)
+        if row is None or row.user_id != user_id:
+            await target.answer('Order not found.')
+            return
+        status = row.status
+    if status in ('pending', 'received'):
+        from .workers import Worker
+        try:
+            await Worker(shop).poll_order(activation_id)
+        except Exception:
+            await target.answer('Provider status temporarily unavailable. Your order is still saved.')
+            return
+    async with Session() as s:
+        row = await s.get(Activation, activation_id)
+        if row is None or row.user_id != user_id:
+            await target.answer('Order not found.')
+            return
+        status = row.status
+        code = row.code
+    if code and status in ('received', 'completed'):
+        await target.answer(f'🔐 Code for order #{activation_id}: {code}\nStatus: {status}')
+    elif status == 'pending':
+        await target.answer(
+            f'Order #{activation_id}: waiting for an SMS at the provider. '
+            'If the sender has not sent a code, Friday cannot create one. '
+            'Use /check again to refresh, or cancel a pending order if unused.')
+    elif status == 'manual_review':
+        await target.answer('This order requires support review. Your reserved funds are protected.')
+    else:
+        await target.answer(f'Order #{activation_id}: {status}. Check /balance for any confirmed refund.')
+
+
+@router.message(Command('check'))
+async def check_command(message: Message):
+    if not await allowed(message.from_user.id, message):
+        return
+    parts = (message.text or '').split()
+    if len(parts) != 2 or not parts[1].isdigit():
+        await message.answer('Usage: /check ORDER_ID (see /orders)')
+        return
+    await check_sms(message, message.from_user.id, int(parts[1]))
+
+
+@router.message(Command('orders'))
+async def orders_command(message: Message):
+    if await allowed(message.from_user.id, message):
+        await show_orders(message, message.from_user.id)
+
+
+async def send_topup_invoice(target, uid: int, raw: str) -> bool:
+    try:
+        amount = Decimal(raw.strip())
+        if not amount.is_finite():
+            raise InvalidOperation()
+        # Shop enforces $5 minimum before rounding for EVERY user.
+        invoice = await shop.start_payment(uid, amount)
+    except (ValueError, InvalidOperation):
+        await target.answer(f'Enter a valid amount in USD. Minimum top-up: ${settings.min_topup}.')
+        return False
+    except BotError as exc:
+        await target.answer(str(exc))
+        return False
+    await clear_flow(uid)
+    await target.answer(
+        f'💳 Invoice for ${invoice["amount"]} USD. '
+        'Pay using the official link below; your wallet credits after confirmation.',
+        reply_markup=InlineKeyboardMarkup(inline_keyboard=[[
+            InlineKeyboardButton(text=('Pay via NOWPayments'
+                if settings.payment_provider == 'nowpayments' else 'Pay via Crypto Bot'),
+                url=invoice['url']),
+        ]]),
+    )
+    return True
+
+
+async def prompt_topup(target, uid: int):
+    if hasattr(target, 'chat') and target.chat.type != 'private':
+        return await target.answer('Open Friday in a private chat to top up.')
+    await save_flow(uid, {'type': 'topup'})
+    await target.answer(
+        f'💳 Enter the amount you want to top up (USD).\n'
+        f'✅ Minimum deposit: ${settings.min_topup}\n'
+        f'❌ Amounts below ${settings.min_topup} will be rejected.\n\n'
+        'Type an amount such as 5, 10, or 20 and send it.'
+    )
+
+
+@router.message(Command('topup', ignore_case=True))
+async def topup_command(message: Message):
+    uid = message.from_user.id
+    if not await allowed(uid, message):
+        return
+    parts = (message.text or '').split(maxsplit=1)
+    if len(parts) == 1:
+        await prompt_topup(message, uid)
+    else:
+        await send_topup_invoice(message, uid, parts[1])
+
+
+def admin_only(message: Message) -> bool:
+    return message.from_user.id in settings.admins
+
+
+@router.message(Command('setupcheck'))
+async def admin_setupcheck(message: Message):
+    """Admin-only, non-billing credential check; never return API keys."""
+    if not admin_only(message):
+        return await message.answer('Admin only')
+    lines = ['🔎 SMS Bot production readiness',
+             f'Provider: {settings.provider_name}',
+             f'Wallet currency: {settings.wallet_currency}',
+             f'Price conversion configured: {"YES" if settings.provider_price_to_wallet > 0 else "NO"}',
+             f'SMS purchasing enabled: {"YES" if settings.live_purchases_enabled else "NO"}',
+             f'Payment acceptance enabled: {"YES" if settings.payments_enabled else "NO"}',
+             f'Payment gateway: {settings.payment_provider}']
+    if not settings.provider_api_key:
+        lines.append(f'{settings.provider_name.title()} API: key missing')
+    else:
+        try:
+            balance = await shop.provider.get_balance()
+            lines.append(f'{settings.provider_name.title()} API: connected (provider balance {balance} raw units)')
+        except Exception:
+            lines.append(f'{settings.provider_name.title()} API: connection or authorization failed')
+    if settings.payment_provider == 'nowpayments':
+        if not settings.nowpayments_api_key:
+            lines.append('NOWPayments API: key missing')
+        else:
+            try:
+                await shop.gateway.check_credentials()
+                lines.append('NOWPayments API: connected')
+            except Exception:
+                lines.append('NOWPayments API: connection or authorization failed')
+        lines.append('NOWPayments IPN secret: ' +
+                     ('configured' if settings.nowpayments_ipn_secret else 'missing'))
+        lines.append('Public callback URL: ' +
+                     ('configured' if settings.public_base_url.startswith('https://') else 'missing'))
+    elif not settings.payment_api_key:
+        lines.append('Crypto Pay API: key missing')
+    else:
+        try:
+            await shop.gateway._call('getMe', {})
+            lines.append('Crypto Pay API: connected')
+        except Exception:
+            lines.append('Crypto Pay API: connection or authorization failed')
+    if settings.provider_price_to_wallet <= 0:
+        lines.append('Next: verify the provider price unit and conversion rate independently.')
+    lines.append('This check did not purchase a number or create an invoice.')
+    await message.answer('\n'.join(lines))
+
+
+@router.message(Command('testall'))
+async def admin_testall(message: Message):
+    """Safe read-only production diagnostics. Never creates paid orders."""
+    if not admin_only(message):
+        return await message.answer('Admin only')
+    lines = ['🧪 Friday system check (read-only)',
+             'Telegram messaging: OK',
+             f'Provider: {settings.provider_name}',
+             f'Payment gateway: {settings.payment_provider}']
+    try:
+        async with Session() as s:
+            users = await s.scalar(select(func.count()).select_from(User))
+            orders = await s.scalar(select(func.count()).select_from(Activation))
+            from .db import LedgerEntry, Payment
+            invoices = await s.scalar(select(func.count()).select_from(Payment))
+            paid = await s.scalar(select(func.count()).select_from(Payment)
+                                  .where(Payment.status == 'paid'))
+            mismatches = await s.scalar(select(func.count()).select_from(User).where(
+                User.balance != (
+                    select(func.coalesce(func.sum(LedgerEntry.amount), 0))
+                    .where(LedgerEntry.user_id == User.id).scalar_subquery())))
+        lines.append(f'Database: OK • {users} users, {orders} orders, {invoices} invoices')
+        lines.append(f'Credited invoices: {paid}')
+        lines.append('Wallet ledger: ' +
+                     ('OK' if mismatches == 0 else f'REVIEW {mismatches} inconsistent wallets'))
+    except Exception:
+        lines.append('Database / ledger: FAILED — inspect Render logs')
+    if settings.provider_api_key:
+        try:
+            balance = await shop.provider.get_balance()
+            prices = await shop.provider.get_prices()
+            lines.append(f'Grizzly: OK • balance {balance}, {len(prices)} stocked offers')
+        except Exception:
+            lines.append('Grizzly API: FAILED (balance or stock lookup)')
+    else:
+        lines.append('Grizzly API: NOT CONFIGURED')
+    if settings.payment_provider == 'nowpayments':
+        if not settings.nowpayments_api_key:
+            lines.append('NOWPayments API: MISSING')
+        else:
+            try:
+                await shop.gateway.check_credentials()
+                lines.append('NOWPayments API: OK')
+            except Exception:
+                lines.append('NOWPayments API: FAILED')
+        lines.append('IPN secret: ' + ('SET' if settings.nowpayments_ipn_secret else 'MISSING'))
+    else:
+        lines.append('Payment provider: Crypto Bot (NOWPayments inactive)')
+    lines.append('Payments enabled: ' + ('YES' if settings.payment_ready else 'NO'))
+    lines.append('New top-ups: ' + ('ADMIN TEST ONLY' if settings.payment_test_admin_only else 'OPEN TO USERS'))
+    lines.append('SMS buying enabled: ' + ('YES' if settings.live_ready else 'NO'))
+    lines.append('⚠️ Provider payments, incoming IPNs, SMS arrival and refunds require'
+                 ' separate real-world tests. No money moved by this check.')
+    await message.answer('\n'.join(lines))
+
+
+@router.message(Command('reconcilepayment'))
+async def admin_reconcile_nowpayment(message: Message):
+    """Recover a verified finished top-up when an IPN was lost or rejected."""
+    if not admin_only(message):
+        return await message.answer('Admin only')
+    if settings.payment_provider != 'nowpayments':
+        return await message.answer('NOWPayments is not selected')
+    try:
+        parts = message.text.split()
+        if len(parts) != 2 or not parts[1].isascii() or not parts[1].isdigit() or len(parts[1]) > 40:
+            return await message.answer('Usage: /reconcilepayment PAYMENT_ID')
+        payment_id = parts[1]
+        remote = await shop.gateway.get_payment_status(payment_id)
+        status = str(remote.get('payment_status', 'unknown')).lower()
+        if status != 'finished':
+            return await message.answer(f'NOWPayments payment status: {status}. Wallet unchanged.')
+        order_id = remote.get('order_id')
+        if not isinstance(order_id, str) or not order_id.startswith('friday-topup-'):
+            return await message.answer('Payment does not match a Friday invoice. Wallet unchanged.')
+        invoice_id = remote.get('invoice_id')
+        invoice_id = str(invoice_id) if invoice_id is not None else None
+        credited = await shop.verify_and_credit_nowpayments(
+            invoice_id, payment_id, order_id=order_id)
+        await message.answer(
+            'Payment confirmed and wallet credited once.' if credited
+            else 'Payment already credited or payment details failed strict matching. Check /testall.')
+    except Exception:
+        # Never log credentials or raw payment details to the Telegram conversation.
+        await message.answer('Unable to reconcile payment securely. Check Render error logs.')
+
+
+@router.message(Command('adjust'))
+async def admin_adjust(message: Message):
+    if not admin_only(message):
+        return await message.answer('Admin only')
+    try:
+        _, uid, raw, reason = message.text.split(maxsplit=3)
+        uid, amount = int(uid), Decimal(raw)
+        if not amount.is_finite() or amount == 0 or not reason.strip():
+            raise ValueError()
+        async with Session.begin() as s:
+            if not await s.get(User, uid):
+                raise BotError('User has not started the bot')
+            from uuid import uuid4
+            await apply(s, uid, amount, 'admin_adjust', 'manual', uuid4().hex, reason)
+        await message.answer('Balance adjustment applied and recorded in ledger.')
+    except (ValueError, InvalidOperation, InsufficientFunds):
+        await message.answer('Usage: /adjust USER_ID AMOUNT reason (negative for debit).')
+    except BotError as exc:
+        await message.answer(str(exc))
+
+
+@router.message(Command('ban', 'unban'))
+async def admin_ban(message: Message):
+    if not admin_only(message):
+        return await message.answer('Admin only')
+    try:
+        uid = int(message.text.split()[1])
+    except (IndexError, ValueError):
+        return await message.answer('Usage: /ban USER_ID or /unban USER_ID')
+    async with Session.begin() as s:
+        user = await s.get(User, uid, with_for_update=True)
+        if not user:
+            return await message.answer('User not found')
+        user.is_banned = message.text.split()[0].lower() == '/ban'
+    await message.answer('Account status updated.')
+
+
+@router.message(Command('markup'))
+async def admin_markup(message: Message):
+    if not admin_only(message):
+        return await message.answer('Admin only')
+    try:
+        percent = Decimal(message.text.split()[1])
+        if not percent.is_finite() or not 0 <= percent <= 500:
+            raise ValueError()
+    except (IndexError, ValueError, InvalidOperation):
+        return await message.answer('Usage: /markup PERCENT (0–500)')
+    async with Session.begin() as s:
+        row = await s.get(Setting, 'markup_percent')
+        if row:
+            row.value = str(percent)
+        else:
+            s.add(Setting(key='markup_percent', value=str(percent)))
+    await message.answer(f'Markup set to {percent}%')
+
+
+@router.message(Command('stats'))
+async def admin_stats(message: Message):
+    if not admin_only(message):
+        return await message.answer('Admin only')
+    async with Session() as s:
+        users = await s.scalar(select(func.count()).select_from(User))
+        total = await s.scalar(select(func.count()).select_from(Activation))
+        success = await s.scalar(select(func.count()).select_from(Activation)
+                                 .where(Activation.status == 'completed'))
+        revenue = await s.scalar(select(func.coalesce(func.sum(Activation.price_charged), 0))
+                                 .where(Activation.status == 'completed'))
+        costs = await s.scalar(select(func.coalesce(func.sum(Activation.cost_provider), 0))
+                               .where(Activation.status == 'completed'))
+    converted = Decimal(str(costs)) * settings.provider_price_to_wallet
+    try:
+        provider_balance = str(await shop.provider.get_balance())
+    except Exception:
+        provider_balance = 'unavailable'
+    await message.answer(f'Users: {users}\nOrders: {total}\nCompleted: {success}\n'
+                         f'Success: {(100*success/total if total else 0):.1f}%\n'
+                         f'Revenue: {revenue} {settings.wallet_currency}\n'
+                         f'Estimated provider cost: {converted} {settings.wallet_currency}\n'
+                         f'Estimated profit: {Decimal(str(revenue))-converted} {settings.wallet_currency}\n'
+                         f'Provider balance (raw): {provider_balance}')
+
+
+@router.message(Command('broadcast'))
+async def admin_broadcast(message: Message):
+    if not admin_only(message):
+        return await message.answer('Admin only')
+    parts = message.text.split(maxsplit=1)
+    if len(parts) < 2 or len(parts[1]) > 1000:
+        return await message.answer('Usage: /broadcast TEXT (max 1000 characters)')
+    async with Session() as s:
+        ids = (await s.scalars(select(User.id).where(User.is_banned.is_(False)))).all()
+    delivered, failed = 0, 0
+    for uid in ids:
+        try:
+            await shop.notifier.send(uid, parts[1])
+            delivered += 1
+        except Exception:
+            failed += 1
+        await asyncio.sleep(.045)
+    await message.answer(f'Broadcast finished: delivered {delivered}, failed {failed}')
+
+
+@router.message(Command('resolve'))
+async def admin_resolve(message: Message):
+    """Operator-confirmed manual refund; use only after investigating provider order."""
+    if not admin_only(message):
+        return await message.answer('Admin only')
+    try:
+        _, raw_id, action = message.text.split(maxsplit=2)
+        aid = int(raw_id)
+        if action.lower() != 'refund':
+            raise ValueError()
+        async with Session() as s:
+            row = await s.get(Activation, aid)
+            if not row or row.status != 'manual_review':
+                return await message.answer('Order is not under manual review')
+        if await shop.refund(aid, 'failed'):
+            await message.answer(f'Order #{aid} refunded; confirm external provider allocation separately.')
+            await shop.alert_admins(f'Manual order #{aid} refund authorized by admin {message.from_user.id}.')
+        else:
+            await message.answer('Order was already resolved')
+    except (IndexError, ValueError):
+        await message.answer('Usage: /resolve ORDER_ID refund (manual review only)')
+, '', 1))
+        if (not value.is_finite() or not (0 < value <= 1000)
+                or value.as_tuple().exponent < -4):
+            raise ValueError()
+    except (ValueError, InvalidOperation):
+        await target.answer('❌ Enter a valid USD price, e.g. 0.90 (up to 4 decimal places).')
+        return
+    item, _ = await shop.quote(service, country)
+    # Reject loss-making prices. This is ADMIN-ONLY information, not public.
+    from .business import Q
+    from decimal import ROUND_UP
+    floor = (item.cost * settings.provider_price_to_wallet).quantize(
+        Q, rounding=ROUND_UP)
+    if value < floor:
+        await target.answer(
+            f'❌ Price too low. The minimum allowed selling price is ${floor} USD. '
+            'Send a higher price.')
+        return
+    value = value.quantize(Q)
+    async with Session.begin() as s:
+        key = f'price:{service}:{country}'
+        row = await s.get(Setting, key)
+        if row:
+            row.value = str(value)
+        else:
+            s.add(Setting(key=key, value=str(value)))
+    await clear_flow(uid)
+    await target.answer(
+        f'✅ PUBLIC PRICE SAVED!\n'
+        f'{service.title()} • Country #{country}: ${value} USD\n'
+        'Customers will see only this price in the country list and '
+        'purchase confirmation. Their wallet will be charged this amount '
+        'on a successful purchase.\n',
+        reply_markup=keyboard([
+            [('💵 Change Another Price', 'ps:services:0')],
+            [('♻️ Reset This Price', f'ps:reset:{service}:{country}')],
+            [('⚙️ Admin Settings', 'admin:settings')],
+        ]),
+    )
+
+
 async def show_balance(target, uid):
     user = await shop.get_user(uid)
     await target.answer(f'Your balance: {user.balance} {settings.wallet_currency}', reply_markup=main_menu_for(uid))
