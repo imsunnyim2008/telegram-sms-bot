@@ -56,11 +56,30 @@ class Shop:
             row = await s.get(Setting, 'markup_percent')
         return Decimal(row.value) if row else settings.markup_percent
 
+    @staticmethod
+    def price_from_settings(item: PriceItem, markup: Decimal,
+                            custom: Decimal | None = None) -> Decimal:
+        """Compute the identical amount used by Telegram and admin website.
+
+        Custom prices may never fall below the live provider base cost.
+        An old custom price that became loss-making rises to the new cost
+        automatically, rather than making Friday lose money.
+        """
+        base = item.cost * settings.provider_price_to_wallet
+        minimum = base.quantize(Q, rounding=ROUND_UP)
+        if custom is not None:
+            return max(minimum, custom.quantize(Q, rounding=ROUND_UP))
+        return (base * (1 + markup / 100)).quantize(Q, rounding=ROUND_UP)
+
     async def price(self, item: PriceItem) -> Decimal:
         if settings.provider_price_to_wallet <= 0:
             raise BotError('Prices are not configured. Ask the admin to verify provider currency.')
-        markup = await self._markup()
-        return (item.cost * settings.provider_price_to_wallet * (1 + markup / 100)).quantize(Q, rounding=ROUND_UP)
+        async with Session() as s:
+            markup = await s.get(Setting, 'markup_percent')
+            override = await s.get(Setting, f'price:{item.service}:{item.country}')
+        percentage = Decimal(markup.value) if markup else settings.markup_percent
+        custom = Decimal(override.value) if override else None
+        return self.price_from_settings(item, percentage, custom)
 
     async def quote(self, service: str, country: str) -> tuple[PriceItem, Decimal]:
         if not settings.service_allowed(service) or not settings.country_allowed(country):
