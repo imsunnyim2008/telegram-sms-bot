@@ -21,6 +21,7 @@ from .handlers import router, set_shop
 from .command_menu import register_native_menu
 from .provider import FiveSim
 from .grizzly import GrizzlySms
+from .textverified import TextVerifiedSms
 from .workers import Worker
 from .service_ui import custom_emoji_unavailable, without_custom_emoji
 from sqlalchemy.exc import IntegrityError
@@ -69,9 +70,19 @@ async def lifespan(app: FastAPI):
     except Exception:
         await bot.session.close()
         raise
-    provider = GrizzlySms() if settings.provider_name == 'grizzly' else FiveSim()
+    # Keep legacy providers available so outstanding orders keep polling
+    # the same provider even after new purchases switch to TextVerified.
+    providers = {
+        'grizzly': GrizzlySms(),
+        'fivesim': FiveSim(),
+        'textverified': TextVerifiedSms(),
+    }
+    provider = providers.get(settings.provider_name)
+    if provider is None:
+        raise RuntimeError('Unknown PROVIDER_NAME')
     gateway = NowPayments() if settings.payment_provider == 'nowpayments' else CryptoBot()
     shop = Shop(provider, gateway, TelegramNotifier(bot))
+    shop.providers = providers
     set_shop(shop)
     dp = Dispatcher()
     dp.include_router(router)
@@ -99,7 +110,8 @@ async def lifespan(app: FastAPI):
             task.cancel()
         await asyncio.gather(*tasks, return_exceptions=True)
         runtime.clear()
-        await provider.aclose()
+        for item in providers.values():
+            await item.aclose()
         await gateway.aclose()
         await bot.session.close()
         await engine.dispose()
