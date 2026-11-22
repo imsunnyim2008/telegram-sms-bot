@@ -1,3 +1,40 @@
+## TextVerified.com incoming SMS webhook
+
+The optional signed webhook receiver is exposed at:
+
+```text
+https://telegram-sms-bot-tgcg.onrender.com/webhook/textverified
+```
+
+For the **app.textverified.com** account (not textverified.org), use the
+**API Configuration → API Webhooks** settings page, enable webhooks, and set
+the public endpoint URL above. From that same provider, securely copy the
+**webhook signing secret** (starts with `whsec_`) and configure it on Render
+as `TEXTVERIFIED_WEBHOOK_SECRET`. It is distinct from the regular
+`TEXTVERIFIED_API_KEY`. Never commit or paste your secret into chat.
+
+**Important:** the receiver rejects everything with HTTP 503 until the
+signing secret is present on Render. Its signature check uses the official
+`X-Webhook-Signature: HMAC-SHA512=<base64>` contract over the exact raw
+request body. `v2.sms.received` events are deduplicated durably and matched
+to one pending TextVerified order by number and (when available) order ID.
+A valid event accelerates the existing authenticated provider API poll; it
+never directly delivers unverified codes or credits a wallet.
+
+To test: use TextVerified's **Send Test** button only after deploying the
+receiver and configuring its matching secret. A 200 response indicates receipt
+was authenticated and acknowledged; verify `/setupcheck` and an authorized
+real SMS separately before claiming end-to-end delivery.
+
+**Purchases don't depend on this webhook:** Friday already checks SMS by
+polling the official TextVerified API. Leaving the provider webhook disabled
+will not prevent buying or checking a number.
+
+Documented schema / signature:
+https://github.com/Westbold/PythonClient/blob/main/swagger.json
+
+---
+
 ## TextVerified SMS integration (November 2026)
 
 Friday now has an **optional TextVerified** SMS provider, grounded in the official
