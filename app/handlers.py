@@ -155,17 +155,19 @@ async def callbacks(callback: CallbackQuery):
             await services(callback.message, int(data.split(':')[1]), edit=True)
         elif data.startswith('countries:'):
             _, service, page = data.split(':')
-            await countries(callback.message, service, int(page), edit=True)
+            await countries(callback.message, service, int(page), edit=True,
+                            viewer_id=uid)
         elif data.startswith('preview:'):
             _, service, country = data.split(':')
-            item, charge = await shop.quote(service, country)
+            item, charge = await shop.quote(service, country, user_id=uid)
             provider = getattr(shop, 'provider', None)
             names = (await provider.get_country_names()
                      if hasattr(provider, 'get_country_names') else {})
             selected_country = names.get(country, f'Country #{country}')
+            price_label = 'Original provider price' if uid in settings.admins else 'Total price'
             await callback.message.answer(
                 f'{service.title()} • {country_flag(selected_country)} {selected_country}\n'
-                f'Available: {item.stock}\nTotal price: {charge} {settings.wallet_currency}\n'
+                f'Available: {item.stock}\n{price_label}: {charge} {settings.wallet_currency}\n'
                 'You are charged only if a code is received; no-code cancellations are refunded.',
                 reply_markup=keyboard([[('✅ Confirm purchase', f'buy:{service}:{country}')],
                                        [('⬅️ Back', f'countries:{service}:0')]]),
@@ -266,7 +268,12 @@ async def services(target, page: int = 0, *, edit: bool = False):
                               keyboard(rows), edit=edit)
 
 
-async def countries(target, service: str, page: int = 0, *, edit: bool = False):
+async def countries(target, service: str, page: int = 0, *, edit: bool = False,
+                    viewer_id: int | None = None):
+    # Callback messages originate from the bot, not from the human pressing
+    # the button. The callback handler must forward the real Telegram user ID.
+    if viewer_id is None:
+        viewer_id = getattr(getattr(target, 'from_user', None), 'id', None)
     if not settings.service_allowed(service):
         raise BotError('Service disabled')
     items = [x for x in await shop.provider.get_prices() if x.service == service]
@@ -284,7 +291,7 @@ async def countries(target, service: str, page: int = 0, *, edit: bool = False):
                           f'unavailable:{label.lower()}')])
         else:
             if settings.provider_price_to_wallet > 0:
-                price = f'{await shop.price(item)} {settings.wallet_currency}'
+                price = f'{await shop.price(item, user_id=viewer_id)} {settings.wallet_currency}'
             else:
                 price = 'price setup required'
             rows.append([(f'{flag} {label} • {price} • {item.stock} left',
@@ -383,9 +390,10 @@ async def admin_price_countries(target, service: str, page: int = 0,
     page, chunk = _pages(arranged, page)
     rows = []
     for item, name, flag in chunk:
-        # ADMIN sees the same public price as a buyer; no raw provider cost.
+        # Admins can compare their original provider cost with the customer price.
+        original = shop.original_price(item)
         public_price = await shop.price(item)
-        rows.append([(f'{flag} {name} • ${public_price} USD',
+        rows.append([(f'{flag} {name} • Original ${original} USD | Public ${public_price} USD',
                       f'ps:set:{service}:{item.country}')])
     nav = []
     if page > 0:
@@ -412,7 +420,8 @@ async def admin_price_prompt(target, uid: int, service: str, country: str):
     await target.answer(
         f'✏️ SET PUBLIC SELLING PRICE\n'
         f'Service: {service.title()}\nCountry: {country_flag(name)} {name}\n'
-        f'Current public price: ${current} USD\n\n'
+        f'Original provider price (admin): ${shop.original_price(item)} USD\n'
+        f'Current public price (customers): ${current} USD\n\n'
         'Send your NEW public price in USD (example: 0.90).\n'
         'Customers will only see your selling price, not the provider cost.\n'
         'Their wallet will be debited this selling price when they purchase.\n'
