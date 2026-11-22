@@ -113,7 +113,8 @@ async def test_order_refresh_keeps_check_cancel_buttons_in_single_card(setup_dat
     assert len(card.edits) == 2
     content, kwargs = card.edits[-1]
     assert "15557778888" in content
-    assert "App: ✈️ Telegram" in content
+    assert 'App: <tg-emoji emoji-id="5415999505952705793">📱</tg-emoji> Telegram' in content
+    assert kwargs['parse_mode'] == 'HTML'
     buttons = [button.callback_data for row in kwargs["reply_markup"].inline_keyboard
                for button in row]
     assert f"check:{aid}" in buttons
@@ -187,9 +188,9 @@ async def test_whatsapp_sms_status_and_orders_show_app_label(setup_database):
             cost_provider=Decimal("0.25"), price_charged=Decimal("0.80"),
         ))
     await handlers.callbacks(Click(99, card, "check:1"))
-    assert "App: 💬 WhatsApp" in card.edits[-1][0]
+    assert 'App: <tg-emoji emoji-id="5418150421279572914">📱</tg-emoji> WhatsApp' in card.edits[-1][0]
     assert "Number: 15557771111" in card.edits[-1][0]
     assert "678912" in card.edits[-1][0]
     await handlers.callbacks(Click(99, card, "orders"))
-    assert "App: 💬 WhatsApp" in card.edits[-1][0]
+    assert 'App: <tg-emoji emoji-id="5418150421279572914">📱</tg-emoji> WhatsApp' in card.edits[-1][0]
     assert "678912" not in card.edits[-1][0]
