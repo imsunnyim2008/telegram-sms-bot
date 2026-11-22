@@ -14,6 +14,7 @@ class Config(BaseSettings):
     provider_api_key: str = ''
     textverified_api_username: str = ''
     textverified_api_key: str = ''
+    textverified_webhook_secret: str = ''
     live_purchases_enabled: bool = False
     wallet_currency: str = 'USD'
     provider_price_to_wallet: Decimal = Decimal('0')
