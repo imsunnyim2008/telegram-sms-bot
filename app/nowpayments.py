@@ -95,13 +95,23 @@ class NowPayments:
             obj = json.loads(raw_body)
             if not isinstance(obj, dict):
                 return False
-            body = json.dumps(canonical_json(obj), separators=(",", ":"),
-                              ensure_ascii=False).encode("utf-8")
+            # NOWPayments docs illustrate sorting the top-level parameters,
+            # while SDKs also support deep-sorted nested fee objects. Both
+            # representations MUST have a matching HMAC-SHA512 with the
+            # merchant's IPN secret. Never accept unsigned payloads.
+            candidates = [
+                json.dumps(canonical_json(obj), separators=(",", ":"),
+                           ensure_ascii=False).encode("utf-8"),
+                json.dumps(dict(sorted(obj.items())), separators=(",", ":"),
+                           ensure_ascii=False).encode("utf-8"),
+            ]
         except (ValueError, UnicodeError, TypeError):
             return False
-        expected = hmac.new(settings.nowpayments_ipn_secret.strip().encode("utf-8"),
-                            body, hashlib.sha512).hexdigest()
-        return hmac.compare_digest(expected.lower(), signature.lower())
+        key = settings.nowpayments_ipn_secret.strip().encode("utf-8")
+        claimed = signature.lower()
+        return any(hmac.compare_digest(
+            hmac.new(key, body, hashlib.sha512).hexdigest(), claimed)
+            for body in candidates)
 
     async def aclose(self) -> None:
         await self.client.aclose()

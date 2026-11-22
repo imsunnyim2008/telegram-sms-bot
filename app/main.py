@@ -136,7 +136,12 @@ async def nowpayments_webhook(request: Request, background: BackgroundTasks):
     if len(raw) > 65536:
         raise HTTPException(status_code=413, detail='Payload too large')
     signature = request.headers.get('x-nowpayments-sig', '')
+    if not signature:
+        log.warning('NOWPayments IPN rejected: signature header missing')
+        raise HTTPException(status_code=401, detail='Invalid signature')
     if not NowPayments.verify_webhook(raw, signature):
+        # Do not print the signature, raw payload or secret.
+        log.warning('NOWPayments IPN rejected: signature mismatch')
         raise HTTPException(status_code=401, detail='Invalid signature')
     try:
         event = json.loads(raw)

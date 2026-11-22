@@ -1,3 +1,30 @@
+## Production audit / payment notification checks
+
+Send `/testall` in Friday as an authorized admin. This **read-only** command
+checks the bot's database, wallet-ledger consistency, stored invoice/order counts,
+Grizzly API balance and stock, and NOWPayments API authentication. It does not
+buy numbers, send SMS, charge cards, create cryptocurrency invoices, or move funds.
+
+If NOWPayments IPNs are rejected, the Render app logs distinguish **missing**
+signature headers from **HMAC mismatches** without printing secrets or payloads.
+An HTTP 401 to a NOWPayments IPN means payment confirmation was **not**
+processed; do not manually credit a wallet based solely on that webhook.
+
+The HMAC verification accepts both the top-level alphabetically sorted
+JSON payload described in NOWPayments' official IPN docs and the recursively
+sorted form used by SDKs. Both require valid HMAC-SHA512 with the IPN secret.
+No unsigned or tampered webhook is accepted.
+
+**End-to-end live tests still necessary:** the merchant must verify the
+payout wallet, create an authorized $2–$5 invoice, send a small actual
+payment, watch the provider transaction reach `finished`, confirm the
+Friday wallet increased **exactly once**, and separately test one authorized
+SMS activation and confirmed cancellation/refund. These require funds and
+user action and are never performed by `/testall`.
+
+NOWPayments IPN reference:
+https://nowpayments.zendesk.com/hc/en-us/articles/21395546303389-IPN-and-how-to-setup
+
 # Telegram Virtual Number SMS Bot — Phone-Friendly V1
 
 ## NOWPayments integration (staged; requires review)
