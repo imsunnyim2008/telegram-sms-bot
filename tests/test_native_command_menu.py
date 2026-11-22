@@ -37,7 +37,7 @@ async def test_native_menu_has_only_all_working_public_commands():
     assert {row[2].chat_id for row in commands[2:]} == {42, 73}
     assert any(isinstance(row[1], MenuButtonCommands) for row in bot.calls
                if row[0] == 'menu')
-    expected = ['start', 'buy', 'balance', 'topup', 'orders', 'check', 'help']
+    expected = ['start', 'buy', 'balance', 'topup', 'orders', 'check', 'help', 'clear']
     for _, cmds, _ in commands:
         assert [c.command for c in cmds] == expected
         assert 'pricing' not in [c.command for c in cmds]
@@ -105,7 +105,8 @@ async def test_admin_panel_shows_commands_only_for_owner(monkeypatch):
     assert '/broadcast MESSAGE' in text
     assert '/setupcheck' in text
     btn = props['reply_markup'].inline_keyboard[0][0]
-    assert btn.web_app.url == 'https://friday.example.com/admin/pricing'
+    assert btn.callback_data == 'ps:services:0'
+    assert btn.web_app is None
     assert '/adjust' not in command_menu.PUBLIC_HELP
     assert '/pricing' not in command_menu.PUBLIC_HELP
     public_keyboard = handlers.main_menu_for(99)
@@ -127,8 +128,8 @@ async def test_admin_callback_cannot_show_settings_to_other_users(monkeypatch):
     await handlers.callbacks(FakeCallback(42, admin, 'admin:settings'))
     assert len(admin.edits) == 1
     assert 'Admin Settings' in admin.edits[0][0]
-    assert 'price manager' in admin.edits[0][0]
-    assert 'Open Price Manager' in admin.edits[0][1]['reply_markup'].inline_keyboard[0][0].text
+    assert 'set a public selling price' in admin.edits[0][0]
+    assert 'Change Public Prices' in admin.edits[0][1]['reply_markup'].inline_keyboard[0][0].text
     assert '/stats' in admin.edits[0][0]
     assert 'admin:home' == admin.edits[0][1]['reply_markup'].inline_keyboard[-1][0].callback_data
 
@@ -141,6 +142,6 @@ async def test_help_command_lists_all_public_commands_without_admin(monkeypatch)
     msg = FakeMessage(99)
     await handlers.help_command(msg)
     content = msg.answers[0][0]
-    for command in ['start', 'buy', 'balance', 'topup', 'orders', 'check', 'help']:
+    for command in ['start', 'buy', 'balance', 'topup', 'orders', 'check', 'help', 'clear']:
         assert '/' + command in content
     assert '/adjust' not in content and '/pricing' not in content
