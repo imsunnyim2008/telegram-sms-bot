@@ -399,28 +399,54 @@ async def orders_command(message: Message):
         await show_orders(message, message.from_user.id)
 
 
-@router.message(Command('topup'))
+async def send_topup_invoice(target, uid: int, raw: str) -> bool:
+    try:
+        amount = Decimal(raw.strip())
+        if not amount.is_finite():
+            raise InvalidOperation()
+        # Shop enforces $5 minimum before rounding for EVERY user.
+        invoice = await shop.start_payment(uid, amount)
+    except (ValueError, InvalidOperation):
+        await target.answer(f'Enter a valid amount in USD. Minimum top-up: ${settings.min_topup}.')
+        return False
+    except BotError as exc:
+        await target.answer(str(exc))
+        return False
+    await clear_flow(uid)
+    await target.answer(
+        f'💳 Invoice for ${invoice["amount"]} USD. '
+        'Pay using the official link below; your wallet credits after confirmation.',
+        reply_markup=InlineKeyboardMarkup(inline_keyboard=[[
+            InlineKeyboardButton(text=('Pay via NOWPayments'
+                if settings.payment_provider == 'nowpayments' else 'Pay via Crypto Bot'),
+                url=invoice['url']),
+        ]]),
+    )
+    return True
+
+
+async def prompt_topup(target, uid: int):
+    if hasattr(target, 'chat') and target.chat.type != 'private':
+        return await target.answer('Open Friday in a private chat to top up.')
+    await save_flow(uid, {'type': 'topup'})
+    await target.answer(
+        f'💳 Enter the amount you want to top up (USD).\n'
+        f'✅ Minimum deposit: ${settings.min_topup}\n'
+        f'❌ Amounts below ${settings.min_topup} will be rejected.\n\n'
+        'Type an amount such as 5, 10, or 20 and send it.'
+    )
+
+
+@router.message(Command('topup', ignore_case=True))
 async def topup_command(message: Message):
     uid = message.from_user.id
     if not await allowed(uid, message):
         return
-    try:
-        _, raw = message.text.split(maxsplit=1)
-        amount = Decimal(raw.strip())
-        if not amount.is_finite():
-            raise ValueError()
-        invoice = await shop.start_payment(uid, amount)
-    except (ValueError, InvalidOperation, BotError) as exc:
-        await message.answer(str(exc) if isinstance(exc, BotError)
-                             else f'Usage: /topup 5 (amount in {settings.wallet_currency})')
-        return
-    await message.answer(
-        f'Invoice for {invoice["amount"]} {settings.wallet_currency}. '
-        'Only pay via the gateway link below. Your wallet credits after confirmed payment.',
-        reply_markup=InlineKeyboardMarkup(inline_keyboard=[[
-            InlineKeyboardButton(text=('Pay via NOWPayments' if settings.payment_provider == 'nowpayments' else 'Pay via Crypto Bot'), url=invoice['url']),
-        ]]),
-    )
+    parts = (message.text or '').split(maxsplit=1)
+    if len(parts) == 1:
+        await prompt_topup(message, uid)
+    else:
+        await send_topup_invoice(message, uid, parts[1])
 
 
 def admin_only(message: Message) -> bool:
