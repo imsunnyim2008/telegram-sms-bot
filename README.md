@@ -1,3 +1,55 @@
+## TextVerified SMS integration (November 2026)
+
+Friday now has an **optional TextVerified** SMS provider, grounded in the official
+API workflow: exchange account email/API key for bearer token, enumerate SMS
+services, check available inventory and prices, purchase a verification, and
+poll the specific order for incoming SMS and parsed code. TextVerified provides
+**US numbers only**; Friday does not show fake UK, Canadian or Nigerian stock
+for this provider. Existing Grizzly and 5SIM purchases remain assigned to
+their original providers for SMS polling and cancellation.
+
+The official Python SDK examples use `pip install textverified` and synchronous
+`TextVerified(...)` calls. Friday's asynchronous FastAPI/aiogram server instead
+calls the **same documented /api/pub/v2 endpoints** directly with its existing
+`httpx` dependency, so the bot event loop stays responsive. No additional
+SDK installation is needed for this async adapter.
+
+**Render Environment — administrator setup (DO NOT commit your credentials):**
+
+```env
+PROVIDER_NAME=textverified
+TEXTVERIFIED_API_USERNAME=<your TextVerified account email>
+TEXTVERIFIED_API_KEY=<your private TextVerified API key>
+WALLET_CURRENCY=USD
+PROVIDER_PRICE_TO_WALLET=1
+LIVE_PURCHASES_ENABLED=false
+```
+
+Do not reuse Grizzly's `PROVIDER_API_KEY`; TextVerified has its own credentials.
+Keep `LIVE_PURCHASES_ENABLED=false` until `/setupcheck` reports connected,
+`/buy` lists real stock/prices, and one authorized low-cost verification,
+SMS delivery, and refund are independently tested. Switching provider alone
+does not guarantee that a third-party platform will send an OTP.
+
+**Money safety:** Purchases are never retried blindly. Uncertain chargeable
+operations go to manual review, including failures fetching details after
+TextVerified accepted a purchase. No wallet refund is applied merely because
+TextVerified says a verification was cancelled; it must confirm a refund.
+TextVerified's prices and credit balance are in USD; the conversion factor
+must be exactly 1. Old active Grizzly orders continue checking through Grizzly,
+as long as the old API credentials remain available.
+
+**No automatic switch:** merging this code does not switch the production bot
+or create charges. The administrator must configure Render environment values
+above and redeploy; only then can this provider be used.
+
+Official TextVerified sources:
+- https://www.textverified.com/automate
+- https://www.textverified.com/products/api
+- https://github.com/Westbold/PythonClient
+
+---
+
 ## Production audit / payment notification checks
 
 Send `/testall` in Friday as an authorized admin. This **read-only** command

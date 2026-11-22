@@ -12,6 +12,8 @@ class Config(BaseSettings):
     database_url: str = 'sqlite+aiosqlite:///./bot.db'
     provider_name: str = 'grizzly'
     provider_api_key: str = ''
+    textverified_api_username: str = ''
+    textverified_api_key: str = ''
     live_purchases_enabled: bool = False
     wallet_currency: str = 'USD'
     provider_price_to_wallet: Decimal = Decimal('0')
@@ -48,8 +50,20 @@ class Config(BaseSettings):
         return not allowed or country.lower() in allowed
 
     @property
+    def provider_credentials_ready(self) -> bool:
+        if self.provider_name == 'textverified':
+            return bool(self.textverified_api_username and self.textverified_api_key)
+        return bool(self.provider_api_key)
+
+    @property
     def live_ready(self) -> bool:
-        return bool(self.live_purchases_enabled and self.provider_api_key and self.provider_price_to_wallet > 0)
+        # TextVerified already quotes USD prices. Conversion must be exactly 1.
+        if self.provider_name == 'textverified':
+            return bool(self.live_purchases_enabled and self.provider_credentials_ready
+                        and self.wallet_currency == 'USD'
+                        and self.provider_price_to_wallet == Decimal('1'))
+        return bool(self.live_purchases_enabled and self.provider_credentials_ready
+                    and self.provider_price_to_wallet > 0)
 
     @property
     def payment_ready(self) -> bool:

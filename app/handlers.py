@@ -390,7 +390,11 @@ async def countries(target, service: str, page: int = 0, *, edit: bool = False,
                      if hasattr(shop.provider, 'get_country_names') else {})
     # The five preferred countries ALWAYS occupy the first five slots.
     # Missing provider offers are labelled unavailable, never sold as stock.
-    arranged = arrange_country_offers(items, country_names)
+    # TextVerified currently only supplies US numbers. Never display four
+    # invented foreign-country choices in this provider's catalogue.
+    arranged = ([(x, 'USA', '🇺🇸') for x in items] if
+                settings.provider_name == 'textverified' else
+                arrange_country_offers(items, country_names))
     page = max(0, min(page, max(0, (len(arranged) - 1) // 8)))
     chunk = arranged[page * 8:(page + 1) * 8]
     rows = []
@@ -798,8 +802,8 @@ async def admin_setupcheck(message: Message):
              f'SMS purchasing enabled: {"YES" if settings.live_purchases_enabled else "NO"}',
              f'Payment acceptance enabled: {"YES" if settings.payments_enabled else "NO"}',
              f'Payment gateway: {settings.payment_provider}']
-    if not settings.provider_api_key:
-        lines.append(f'{settings.provider_name.title()} API: key missing')
+    if not settings.provider_credentials_ready:
+        lines.append(f'{settings.provider_name.title()} API: credentials missing')
     else:
         try:
             balance = await shop.provider.get_balance()
@@ -860,15 +864,15 @@ async def admin_testall(message: Message):
                      ('OK' if mismatches == 0 else f'REVIEW {mismatches} inconsistent wallets'))
     except Exception:
         lines.append('Database / ledger: FAILED — inspect Render logs')
-    if settings.provider_api_key:
+    if settings.provider_credentials_ready:
         try:
             balance = await shop.provider.get_balance()
             prices = await shop.provider.get_prices()
-            lines.append(f'Grizzly: OK • balance {balance}, {len(prices)} stocked offers')
+            lines.append(f'{settings.provider_name}: OK • balance {balance}, {len(prices)} stocked offers')
         except Exception:
-            lines.append('Grizzly API: FAILED (balance or stock lookup)')
+            lines.append(f'{settings.provider_name} API: FAILED (balance or stock lookup)')
     else:
-        lines.append('Grizzly API: NOT CONFIGURED')
+        lines.append(f'{settings.provider_name} API: NOT CONFIGURED')
     if settings.payment_provider == 'nowpayments':
         if not settings.nowpayments_api_key:
             lines.append('NOWPayments API: MISSING')
