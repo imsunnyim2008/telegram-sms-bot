@@ -9,9 +9,9 @@ from sqlalchemy.ext.asyncio import async_sessionmaker, create_async_engine
 
 import app.handlers as handlers
 import app.business as business
-from app.business import Shop, BotError
+from app.business import Shop
 from app.config import settings
-from app.db import Base, User, Payment, Activation, LedgerEntry
+from app.db import Base, User, Payment, LedgerEntry
 from app.provider import PriceItem
 
 
@@ -142,7 +142,7 @@ async def test_administrator_can_select_country_and_set_only_public_price(setup_
     # Customer sees only the configured public price; no provider cost.
     await handlers.countries(customer, 'telegram')
     visible = customer.answers[-1][1]['reply_markup'].inline_keyboard[0][0].text
-    assert '$0.9500' in visible and '$0.4500' not in visible
+    assert '0.9500 USD' in visible and '0.4500 USD' not in visible
     order = await shop.buy(99, 'telegram', '12')
     assert order.price_charged == Decimal('.9500')
     async with session() as db:
