@@ -1,11 +1,13 @@
 """Inline-keyboard Telegram UI. No financial operations live inside callbacks."""
 import asyncio
+import json
+import time
 from decimal import Decimal, InvalidOperation
 
-from aiogram import Router
+from aiogram import F, Router
 from aiogram.exceptions import TelegramBadRequest
 from aiogram.filters import Command, CommandStart
-from aiogram.types import CallbackQuery, InlineKeyboardButton, InlineKeyboardMarkup, Message, WebAppInfo
+from aiogram.types import CallbackQuery, InlineKeyboardButton, InlineKeyboardMarkup, Message
 from sqlalchemy import func, select
 
 from .business import BotError
@@ -50,14 +52,10 @@ def main_menu_for(uid: int) -> InlineKeyboardMarkup:
 
 
 def admin_settings_keyboard() -> InlineKeyboardMarkup:
-    rows = []
-    if settings.public_base_url.startswith('https://'):
-        rows.append([InlineKeyboardButton(
-            text='💵 Open Price Manager',
-            web_app=WebAppInfo(url=settings.public_base_url.rstrip('/') + '/admin/pricing'),
-        )])
-    rows.append([InlineKeyboardButton(text='⬅️ Back to Main Menu', callback_data='admin:home')])
-    return InlineKeyboardMarkup(inline_keyboard=rows)
+    return keyboard([
+        [('💵 Change Public Prices', 'ps:services:0')],
+        [('⬅️ Back to Main Menu', 'admin:home')],
+    ])
 
 TERMS = ('Terms: Buy only for accounts you own or are authorized to test. '
          'Respect the provider and destination platform rules. No fraud, impersonation, '
