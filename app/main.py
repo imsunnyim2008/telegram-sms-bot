@@ -165,7 +165,7 @@ async def nowpayments_webhook(request: Request, background: BackgroundTasks):
     invoice_id = str(invoice_id) if invoice_id is not None else None
     if invoice_id is not None and not (invoice_id.isascii() and
                                        invoice_id.isdigit() and len(invoice_id) <= 40):
-        invoice_id = None
+        raise HTTPException(status_code=400, detail='Malformed invoice ID')
     payment_id = str(event.get('payment_id', ''))
     if not (payment_id.isascii() and payment_id.isdigit() and len(payment_id) <= 40):
         raise HTTPException(status_code=400, detail='Malformed payment ID')
