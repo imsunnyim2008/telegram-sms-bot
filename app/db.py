@@ -93,6 +93,18 @@ class TextVerifiedWebhookReceipt(Base):
     processed_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utcnow)
 
 
+class MaintenanceNotice(Base):
+    """Durable, private notification queue; contains no phone numbers or codes."""
+    __tablename__ = 'maintenance_notices'
+    id: Mapped[int] = mapped_column(Integer, primary_key=True)
+    user_id: Mapped[int] = mapped_column(ForeignKey('users.id'), index=True)
+    state: Mapped[str] = mapped_column(String(8))
+    status: Mapped[str] = mapped_column(String(12), default='pending', index=True)
+    attempts: Mapped[int] = mapped_column(Integer, default=0)
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utcnow)
+    next_attempt_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utcnow)
+
+
 class Setting(Base):
     __tablename__ = 'settings'
     key: Mapped[str] = mapped_column(String(80), primary_key=True)
