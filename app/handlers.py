@@ -4,7 +4,7 @@ import json
 import logging
 import time
 from secrets import token_hex
-from datetime import timezone
+from datetime import timedelta, timezone
 from decimal import Decimal, InvalidOperation
 from html import escape
 
@@ -12,13 +12,14 @@ from aiogram import F, Router
 from aiogram.exceptions import TelegramBadRequest
 from aiogram.filters import Command, CommandStart
 from aiogram.types import CallbackQuery, InlineKeyboardButton, InlineKeyboardMarkup, Message
-from sqlalchemy import func, select
+from sqlalchemy import String, cast, func, select
 
 from .business import BotError
 from .config import settings
 from .country_ui import arrange_country_offers, country_flag
 from .command_menu import PUBLIC_HELP, ADMIN_HELP
-from .db import Activation, LedgerEntry, Session, Setting, User, utcnow
+from .db import Activation, AdminAudit, LedgerEntry, Payment, Session, Setting, SupportMessage, User, utcnow
+from .operations import LAGOS, audit, notice, report, risk_summary
 from .auto_maintenance import acknowledge, manual_mode
 from .ledger import InsufficientFunds, apply
 from .service_ui import (app_label_html, custom_emoji_unavailable,
@@ -45,6 +46,7 @@ MAIN = keyboard([
     [('📱 Buy number', 'services:0'), ('💰 Balance', 'balance')],
     [('💳 Top up', 'topup'), ('📋 My orders', 'orders')],
     [('📜 History', 'ui:history'), ('💸 Refunds', 'ui:refunds')],
+    [('💳 My deposits', 'ui:deposits')],
     [('👤 My account', 'ui:account'), ('🎧 Support', 'ui:support')],
     [('❓ Help', 'help'), ('🧹 Clear chat', 'ui:clear')],
 ])
@@ -53,6 +55,7 @@ MAIN_ADMIN = keyboard([
     [('📱 Buy number', 'services:0'), ('💰 Balance', 'balance')],
     [('💳 Top up', 'topup'), ('📋 My orders', 'orders')],
     [('📜 History', 'ui:history'), ('💸 Refunds', 'ui:refunds')],
+    [('💳 My deposits', 'ui:deposits')],
     [('👤 My account', 'ui:account'), ('🎧 Support', 'ui:support')],
     [('❓ Help', 'help'), ('🧹 Clear chat', 'ui:clear')],
     [('⚙️ Admin Settings', 'admin:settings')],
@@ -67,7 +70,10 @@ def admin_settings_keyboard() -> InlineKeyboardMarkup:
     return keyboard([
         [('💵 Change Public Prices', 'ps:services:0'), ('📈 Markup', 'ui:markup')],
         [('🛠 Maintenance', 'ui:maintenance'), ('📊 Business stats', 'ui:stats')],
-        [('🗓 Daily report', 'ui:dailyreport'), ('🧪 System check', 'ui:testall')],
+        [('🗓 Reports', 'ui:reports'), ('🧪 System check', 'ui:testall')],
+        [('🛡 Risk review', 'ui:risk'), ('📜 Admin activity', 'ui:audit')],
+        [('🔍 Find customer', 'ui:searchcustomer'), ('💵 Low balance alert', 'ui:lowthreshold')],
+        [('📡 Health dashboard', 'ui:health')],
         [('🔌 API setup check', 'ui:setupcheck'), ('👥 Customers', 'ui:customers')],
         [('🎧 Support tickets', 'ui:tickets'), ('💳 Reconcile payment', 'ui:reconcilepayment')],
         [('📣 Broadcast', 'ui:broadcast'), ('⚖️ Review orders', 'ui:review')],
@@ -635,10 +641,20 @@ async def show_balance(target, uid, *, edit: bool = False):
     )
 
 
-async def show_orders(target, uid, *, edit: bool = False):
+async def show_orders(target, uid, *, edit: bool = False, state='all'):
     async with Session() as s:
-        orders = (await s.scalars(select(Activation).where(Activation.user_id == uid)
-                                  .order_by(Activation.id.desc()).limit(10))).all()
+        query = select(Activation).where(Activation.user_id == uid)
+        if state == 'active':
+            query = query.where(Activation.status.in_(('pending', 'ordering', 'received', 'manual_review')))
+        elif state == 'completed':
+            query = query.where(Activation.status == 'completed')
+        elif state == 'refunded':
+            query = query.where(Activation.status.in_(('cancelled', 'expired', 'failed')),
+                                Activation.id.in_(select(Activation.id).join(LedgerEntry,
+                                    (LedgerEntry.user_id == uid) & (LedgerEntry.ref_type == 'activation') &
+                                    (LedgerEntry.ref_id == cast(Activation.id, String)) &
+                                    (LedgerEntry.type == 'refund'))))
+        orders = (await s.scalars(query.order_by(Activation.id.desc()).limit(10))).all()
     lines = []
     for row in orders:
         number = row.phone if row.status in ('pending', 'ordering', 'received') else (
@@ -650,7 +666,9 @@ async def show_orders(target, uid, *, edit: bool = False):
     await show_selection_menu(
         target, '\n'.join(lines) if lines else 'No orders yet.',
         keyboard([[ (f'Order #{row.id} · {row.service.title()}', f'ui:order:{row.id}') ] for row in orders]
-                 + [[('⬅️ Main menu', 'menu:home')]]), edit=edit,
+                 + [[('All', 'ui:filterorders:all'), ('Active', 'ui:filterorders:active')],
+                    [('Completed', 'ui:filterorders:completed'), ('Refunded', 'ui:filterorders:refunded')],
+                    [('⬅️ Main menu', 'menu:home')]]), edit=edit,
         parse_mode='HTML',
     )
 
@@ -978,7 +996,9 @@ async def admin_adjust(message: Message):
             if not await s.get(User, uid):
                 raise BotError('User has not started the bot')
             from uuid import uuid4
-            await apply(s, uid, amount, 'admin_adjust', 'manual', uuid4().hex, reason)
+            ref = uuid4().hex
+            await apply(s, uid, amount, 'admin_adjust', 'manual', ref, reason)
+            audit(s, message.from_user.id, 'wallet_adjust', f'{uid}:{ref}')
         await message.answer('Balance adjustment applied and recorded in ledger.')
     except (ValueError, InvalidOperation, InsufficientFunds):
         await message.answer('Usage: /adjust USER_ID AMOUNT reason (negative for debit).')
@@ -999,6 +1019,7 @@ async def admin_ban(message: Message):
         if not user:
             return await message.answer('User not found')
         user.is_banned = message.text.split()[0].lower() == '/ban'
+        audit(s, message.from_user.id, 'ban' if user.is_banned else 'unban', uid)
     await message.answer('Account status updated.')
 
 
@@ -1020,6 +1041,7 @@ async def admin_markup(message: Message):
             row.value = str(percent)
         else:
             s.add(Setting(key='markup_percent', value=str(percent)))
+        audit(s, message.from_user.id, 'markup', str(percent))
     await message.answer(f'Markup set to {percent}%')
 
 
@@ -1272,7 +1294,9 @@ async def customer_support(message: Message):
             await shop.alert_admins(f'Customer requested support review for order #{aid}. Use /tickets.')
         except Exception:
             log.warning('Support notification failed; ticket remains stored.')
-    await message.answer(f'Support request for order #{aid} recorded. Do not share your verification code.')
+    await message.answer(f'Support request for order #{aid} recorded. Do not share your verification code.',
+                         reply_markup=keyboard([[('✏️ Describe issue', f'ui:supportwrite:{aid}'),
+                                                 ('📜 View replies', f'ui:thread:{aid}')]]))
 
 
 @router.message(Command('tickets'))
@@ -1295,6 +1319,7 @@ async def admin_close_ticket(message: Message):
         if order is None or ticket is None:
             return await message.answer('Ticket not found.')
         await s.delete(ticket)
+        audit(s, message.from_user.id, 'close_ticket', order.id)
         uid = order.user_id
     try:
         await shop.notifier.send(uid, f'Support review for order #{parts[1]} was closed. Use /orders for its status.')
@@ -1310,12 +1335,12 @@ async def admin_maintenance(message: Message):
     parts = message.text.lower().split()
     if len(parts) != 2 or parts[1] not in ('on', 'off'):
         return await maintenance_picker(message)
-    await set_maintenance(parts[1])
+    await set_maintenance(parts[1], actor=message.from_user.id)
     await maintenance_picker(message)
 
 
-async def set_maintenance(value):
-    return await manual_mode(Session, value)
+async def set_maintenance(value, actor=None):
+    return await manual_mode(Session, value, actor=actor)
 
 
 @router.message(Command('ack'))
@@ -1447,7 +1472,7 @@ async def ticket_picker(target, *, edit=False):
     async with Session() as s:
         rows = (await s.scalars(select(Setting).where(Setting.key.startswith('support_order:'))
                                 .order_by(Setting.value.desc()).limit(20))).all()
-    buttons = [[(f'Close ticket #{row.key.split(":")[1]}', f'ui:closeticket:{row.key.split(":")[1]}')]
+    buttons = [[(f'Open ticket #{row.key.split(":")[1]}', f'ui:thread:{row.key.split(":")[1]}')]
                for row in rows]
     await show_selection_menu(target, '🎧 Open support tickets' if rows else 'No open tickets.',
                               keyboard(buttons + [[('⬅️ Admin Settings', 'admin:settings')]]), edit=edit)
@@ -1544,7 +1569,8 @@ async def button_action(callback, uid, action):
     target, actor = callback.message, callback.from_user
     parts = action.split(':')
     name = parts[0]
-    public = {'history', 'refunds', 'account', 'support', 'receipt', 'done', 'check', 'order', 'clear'}
+    public = {'history', 'refunds', 'account', 'support', 'receipt', 'done', 'check', 'order', 'clear',
+              'deposits', 'depositreceipt', 'filterorders', 'thread', 'supportwrite', 'opcancel'}
     if name not in public and uid not in settings.admins:
         return await target.answer('Admin only')
     if name == 'ackoutage' and len(parts) == 2:
@@ -1563,12 +1589,14 @@ async def button_action(callback, uid, action):
             return await handlers[command](ButtonRequest(target, actor, f'/{command} {flow["value"]}'))
         return
     await clear_flow(uid)
+    if await operations_button(target, uid, parts):
+        return
     if name == 'cancel':
         return await show_selection_menu(target, 'Cancelled. Admin Settings', admin_settings_keyboard(), edit=True)
     if name == 'maintenance':
         return await maintenance_picker(target, edit=True)
     if name == 'maint' and len(parts) == 2 and parts[1] in ('on', 'off'):
-        await set_maintenance(parts[1])
+        await set_maintenance(parts[1], actor=uid)
         return await maintenance_picker(target, edit=True)
     if name == 'customers':
         return await customer_picker(target, uid, page=int(parts[1]) if len(parts) == 2 else 0, edit=True)
@@ -1659,6 +1687,8 @@ async def handle_pending_text(message: Message):
     flow = await read_flow(uid)
     if not flow:
         return
+    if flow.get('type') == 'ops_input':
+        return await operations_input(message, uid, flow, raw)
     if flow.get('type') == 'button_input':
         if uid not in settings.admins:
             await clear_flow(uid)
