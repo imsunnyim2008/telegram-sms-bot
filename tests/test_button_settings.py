@@ -4,7 +4,9 @@ from datetime import timedelta
 import pytest
 
 import app.handlers as handlers
-from app.db import Activation, Setting, User, utcnow
+from app.db import Activation, MaintenanceNotice, Setting, User, utcnow
+from sqlalchemy import select
+import app.workers as workers
 import test_inbot_pricing_topup as fixtures
 
 setup_database = fixtures.setup_database
@@ -81,3 +83,61 @@ async def test_order_picker_lists_only_own_orders(setup_database):
     assert 'ui:receipt:2' not in choices
     await handlers.callbacks(Click(guest, 'ui:order:2'))
     assert 'Order not found' in guest.answers[-1][0]
+
+@pytest.mark.asyncio
+async def test_maintenance_transition_notifies_customers_once(setup_database, monkeypatch):
+    session, shop, _ = setup_database
+    monkeypatch.setattr(workers, 'Session', session)
+    delivered = []
+
+    async def send(uid, text):
+        delivered.append((uid, text))
+
+    monkeypatch.setattr(shop.notifier, 'send', send)
+    assert await handlers.set_maintenance('on')
+    assert not await handlers.set_maintenance('on')
+    worker = workers.Worker(shop)
+    await worker.deliver_maintenance_notices()
+    assert len(delivered) == 2
+    assert all('undergoing maintenance' in text for _, text in delivered)
+    await worker.deliver_maintenance_notices()
+    assert len(delivered) == 2
+    assert await handlers.set_maintenance('off')
+    await worker.deliver_maintenance_notices()
+    assert len(delivered) == 4
+    assert all('back online' in text for _, text in delivered[2:])
+    async with session() as db:
+        notices = (await db.scalars(select(MaintenanceNotice))).all()
+        assert len(notices) == 4
+        assert all(row.status == 'sent' for row in notices)
+
+
+@pytest.mark.asyncio
+async def test_api_failure_alert_is_deduplicated_and_recovery_announced(setup_database, monkeypatch):
+    session, shop, _ = setup_database
+    monkeypatch.setattr(workers, 'Session', session)
+    monkeypatch.setattr(workers.settings, 'payments_enabled', False)
+    monkeypatch.setattr(workers.settings, 'provider_name', 'grizzly')
+    monkeypatch.setattr(workers.settings, 'provider_api_key', 'test-key')
+    delivered = []
+    original = shop.provider.get_prices
+
+    async def send(uid, text):
+        delivered.append((uid, text))
+
+    async def fail():
+        raise RuntimeError('sensitive upstream details')
+
+    monkeypatch.setattr(shop.notifier, 'send', send)
+    monkeypatch.setattr(shop.provider, 'get_prices', fail)
+    worker = workers.Worker(shop)
+    await worker.check_api_health()
+    await worker.check_api_health()
+    assert len(delivered) == 1
+    assert delivered[0][0] == 7031009238
+    assert 'catalogue API health check failed' in delivered[0][1]
+    assert 'sensitive' not in delivered[0][1]
+    monkeypatch.setattr(shop.provider, 'get_prices', original)
+    await worker.check_api_health()
+    assert len(delivered) == 2
+    assert 'responding again' in delivered[-1][1]
