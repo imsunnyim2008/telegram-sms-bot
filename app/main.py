@@ -27,6 +27,7 @@ from .textverified_webhooks import (valid_signature as valid_textverified_signat
                                     wake_matching_orders)
 from .workers import Worker
 from .operations import accept_finished_ipn
+from .bank_deposits import notify_name_matches
 from .moniepoint import webhook_secret, valid_signature as moniepoint_signature, parse_transfer, record_transfer
 from .service_ui import custom_emoji_unavailable, without_custom_emoji
 from sqlalchemy.exc import IntegrityError
@@ -296,6 +297,7 @@ async def nowpayments_webhook(request: Request, background: BackgroundTasks):
 
 @web.post('/webhook/moniepoint')
 async def moniepoint_webhook(request: Request):
+    log.info('Moniepoint webhook received')
     secret = webhook_secret()
     if not secret:
         raise HTTPException(status_code=503, detail='Moniepoint signing secret not configured')
@@ -309,13 +311,19 @@ async def moniepoint_webhook(request: Request):
     timestamp = request.headers.get('moniepoint-webhook-timestamp', '')
     signature = request.headers.get('moniepoint-webhook-signature', '')
     if not moniepoint_signature(raw, webhook_id, timestamp, signature, secret):
+        log.warning('Moniepoint webhook signature rejected')
         raise HTTPException(status_code=401, detail='Invalid signature')
     try:
         data = parse_transfer(raw)
     except (ValueError, TypeError, UnicodeError):
+        log.warning('Moniepoint signed transaction payload rejected')
         raise HTTPException(status_code=400, detail='Invalid transaction event')
     if data is not None:
         await record_transfer(Session, webhook_id, data)
+        await notify_name_matches(Session, data)
+        log.info('Moniepoint signed event processed: %s', data['event_type'])
+    else:
+        log.info('Moniepoint signed event ignored: unsupported type')
     return {'ok': True}
 
 
