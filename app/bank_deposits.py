@@ -16,6 +16,8 @@ from .moniepoint import identity_key, webhook_secret
 from .operations import audit, notice
 
 KEY = 'bank_deposit_config'
+MIN_NAIRA = 500
+MIN_KOBO = MIN_NAIRA * 100
 ELIGIBLE = ('V1_TRANSFER_TRANSACTION', 'V1_POS_TRANSFER_TRANSACTION', 'V1_POS_COLLECTION_TRANSACTION')
 
 
@@ -35,9 +37,12 @@ def amount_kobo(raw):
         amount = Decimal(raw)
         if not amount.is_finite() or amount <= 0 or amount > Decimal('100000000') or amount.as_tuple().exponent < -2:
             raise ValueError()
-        return int(amount * 100)
+        kobo = int(amount * 100)
     except (InvalidOperation, ValueError):
-        raise ValueError('Enter a positive naira amount, at most two decimal places.')
+        raise ValueError('Please enter a valid amount in naira (up to two decimal places).')
+    if kobo < MIN_KOBO:
+        raise ValueError(f'Minimum bank deposit: ₦{MIN_NAIRA:,}. Please enter a higher amount.')
+    return kobo
 
 
 async def update_config(session, actor, field, value):
@@ -80,7 +85,10 @@ def new_remark():
     return 'FRIDAY' + token_hex(12).upper()
 
 
-async def create_claim(session, uid, kobo, rate, method, raw):
+async def create_claim(session, uid, kobo, rate, method, raw, *, existing_quote=False):
+    # Previously issued quotes remain claimable so an already-paid transfer is not stranded.
+    if type(kobo) is not int or kobo <= 0 or (kobo < MIN_KOBO and not existing_quote):
+        raise ValueError(f'Minimum bank deposit: ₦{MIN_NAIRA:,}.')
     if method not in ('id', 'name', 'session', 'remark') or not webhook_secret():
         raise ValueError('Bank verification is unavailable.')
     if not 2 <= len(raw) <= 200 or any(ord(c) < 32 for c in raw):
