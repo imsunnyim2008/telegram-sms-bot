@@ -4,10 +4,10 @@ import logging
 from datetime import timedelta, timezone
 from html import escape
 
-from sqlalchemy import select
+from sqlalchemy import delete, select
 
 from .config import settings
-from .db import Activation, Payment, Session, Setting, utcnow
+from .db import Activation, MaintenanceNotice, Payment, Session, Setting, User, utcnow
 from .provider import ProviderError
 from .service_ui import app_label_html
 from .textverified_webhooks import prune_old_receipts
@@ -46,6 +46,9 @@ class Worker:
                 await self.poll_order(aid)
             except Exception:
                 log.exception('Polling failed for order %s', aid)
+        await self.deliver_maintenance_notices()
+        if self._loops == 1 or self._loops % 24 == 0:
+            await self.check_api_health()
         if self._loops % 6 == 0:
             await self.poll_payments()
         if self._loops % 12 == 0:
@@ -53,6 +56,91 @@ class Worker:
         if self._loops % 720 == 0:
             await self.cleanup()
             await self.low_balance_alert()
+
+
+    async def deliver_maintenance_notices(self):
+        # Only the single production worker drains the queue. Never send codes,
+        # balances or phone numbers in a broadcast.
+        async with Session() as s:
+            rows = (await s.scalars(select(MaintenanceNotice).where(
+                MaintenanceNotice.status == 'pending',
+                MaintenanceNotice.next_attempt_at <= utcnow(),
+            ).order_by(MaintenanceNotice.id).limit(20))).all()
+        for notice in rows:
+            async with Session() as s:
+                user = await s.get(User, notice.user_id)
+                newer = await s.scalar(select(MaintenanceNotice.id).where(
+                    MaintenanceNotice.user_id == notice.user_id,
+                    MaintenanceNotice.id > notice.id).limit(1))
+            if newer or not user or user.is_banned or not user.accepted_terms:
+                status = 'skipped'
+            else:
+                text = ('🛠 FRIDAY is undergoing maintenance. New purchases are temporarily paused. '
+                        'Existing orders and refunds remain available.'
+                        if notice.state == 'on' else
+                        '🟢 FRIDAY is back online. Purchase maintenance has ended. '
+                        'New purchases are available subject to provider stock and availability.')
+                try:
+                    await self.shop.notifier.send(notice.user_id, text)
+                    status = 'sent'
+                except Exception:
+                    status = 'failed' if notice.attempts >= 2 else 'pending'
+            async with Session.begin() as s:
+                row = await s.get(MaintenanceNotice, notice.id, with_for_update=True)
+                if row and row.status == 'pending':
+                    row.status = status
+                    row.attempts += 1
+                    row.next_attempt_at = utcnow() + timedelta(minutes=1)
+            await asyncio.sleep(.06)
+
+    async def check_api_health(self):
+        async def probe(label, operation):
+            try:
+                await asyncio.wait_for(operation(), timeout=25)
+                healthy = True
+            except Exception:
+                healthy = False
+            for admin in settings.admins:
+                key = f'api_health:{label}:{admin}'
+                now = utcnow()
+                async with Session() as s:
+                    row = await s.get(Setting, key)
+                    previous = row.value if row else ''
+                if healthy:
+                    if not previous.startswith('down:'):
+                        continue
+                    message = f'🟢 FRIDAY: {label} API is responding again.'
+                    value = 'up'
+                else:
+                    if previous.startswith('down:'):
+                        try:
+                            if now.timestamp() - float(previous[5:]) < 1800:
+                                continue
+                        except ValueError:
+                            pass
+                    message = (f'🚨 FRIDAY: {label} API health check failed. '
+                               'Check provider dashboard and Render logs. No funds moved.')
+                    value = f'down:{now.timestamp()}'
+                try:
+                    await self.shop.notifier.send(admin, message)
+                except Exception:
+                    log.warning('API health alert delivery failed for %s', label)
+                    continue
+                async with Session.begin() as s:
+                    row = await s.get(Setting, key, with_for_update=True)
+                    if row:
+                        row.value = value
+                    else:
+                        s.add(Setting(key=key, value=value))
+
+        if settings.provider_credentials_ready:
+            await probe(settings.provider_name + ' balance', self.shop.provider.get_balance)
+            await probe(settings.provider_name + ' catalogue', self.shop.provider.get_prices)
+        if settings.payment_ready:
+            if settings.payment_provider == 'nowpayments':
+                await probe('NOWPayments', self.shop.gateway.check_credentials)
+            else:
+                await probe('CryptoBot', lambda: self.shop.gateway._call('getMe', {}))
 
     async def poll_order(self, aid: int):
         async with Session() as s:
@@ -183,6 +271,10 @@ class Worker:
             for row in rows:
                 row.code = None
                 row.phone = None
+        async with Session.begin() as s:
+            await s.execute(delete(MaintenanceNotice).where(
+                MaintenanceNotice.status != 'pending',
+                MaintenanceNotice.created_at < utcnow() - timedelta(days=7)))
         await prune_old_receipts()
 
     async def low_balance_alert(self):
