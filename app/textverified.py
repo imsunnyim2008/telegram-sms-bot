@@ -136,11 +136,11 @@ class TextVerifiedSms:
                 raise AmbiguousPurchase("TextVerified purchase response unclear") from exc
             raise ProviderError("TextVerified returned invalid JSON") from exc
 
-    async def get_prices(self) -> list[PriceItem]:
-        if self._cache and time.monotonic() - self._cached_at < 60:
+    async def get_prices(self, *, fresh: bool = False) -> list[PriceItem]:
+        if not fresh and self._cache and time.monotonic() - self._cached_at < 60:
             return self._cache
         async with self._price_lock:
-            if self._cache and time.monotonic() - self._cached_at < 60:
+            if not fresh and self._cache and time.monotonic() - self._cached_at < 60:
                 return self._cache
             if not settings.country_allowed(US):
                 return []
@@ -161,8 +161,10 @@ class TextVerifiedSms:
                     allowed[name] = True
 
             sem = asyncio.Semaphore(4)
+            failures = 0
 
             async def quote(service):
+                nonlocal failures
                 async with sem:
                     request = {"serviceName": service, "capability": "sms",
                                "numberType": "mobile"}
@@ -183,10 +185,13 @@ class TextVerifiedSms:
                             return None
                         return PriceItem(service, US, cost, qty)
                     except (ProviderError, ValueError, TypeError, KeyError):
+                        failures += 1
                         log.warning("TextVerified quote unavailable for a permitted service")
                         return None
 
             found = await asyncio.gather(*(quote(s) for s in sorted(allowed)))
+            if fresh and allowed and failures == len(allowed):
+                raise ProviderError('TextVerified inventory/pricing requests all failed')
             offers = [p for p in found if p is not None]
             self._cache = offers
             self._cached_at = time.monotonic()
