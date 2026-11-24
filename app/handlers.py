@@ -3,6 +3,7 @@ import asyncio
 import json
 import logging
 import time
+from secrets import token_hex
 from datetime import timezone
 from decimal import Decimal, InvalidOperation
 from html import escape
@@ -42,12 +43,16 @@ def keyboard(rows):
 MAIN = keyboard([
     [('📱 Buy number', 'services:0'), ('💰 Balance', 'balance')],
     [('💳 Top up', 'topup'), ('📋 My orders', 'orders')],
+    [('📜 History', 'ui:history'), ('💸 Refunds', 'ui:refunds')],
+    [('👤 My account', 'ui:account'), ('🎧 Support', 'ui:support')],
     [('❓ Help', 'help')],
 ])
 
 MAIN_ADMIN = keyboard([
     [('📱 Buy number', 'services:0'), ('💰 Balance', 'balance')],
     [('💳 Top up', 'topup'), ('📋 My orders', 'orders')],
+    [('📜 History', 'ui:history'), ('💸 Refunds', 'ui:refunds')],
+    [('👤 My account', 'ui:account'), ('🎧 Support', 'ui:support')],
     [('❓ Help', 'help')],
     [('⚙️ Admin Settings', 'admin:settings')],
 ])
@@ -59,7 +64,12 @@ def main_menu_for(uid: int) -> InlineKeyboardMarkup:
 
 def admin_settings_keyboard() -> InlineKeyboardMarkup:
     return keyboard([
-        [('💵 Change Public Prices', 'ps:services:0')],
+        [('💵 Change Public Prices', 'ps:services:0'), ('📈 Markup', 'ui:markup')],
+        [('🛠 Maintenance', 'ui:maintenance'), ('📊 Business stats', 'ui:stats')],
+        [('🗓 Daily report', 'ui:dailyreport'), ('🧪 System check', 'ui:testall')],
+        [('🔌 API setup check', 'ui:setupcheck'), ('👥 Customers', 'ui:customers')],
+        [('🎧 Support tickets', 'ui:tickets'), ('💳 Reconcile payment', 'ui:reconcilepayment')],
+        [('📣 Broadcast', 'ui:broadcast'), ('⚖️ Review orders', 'ui:review')],
         [('⬅️ Back to Main Menu', 'admin:home')],
     ])
 
@@ -171,6 +181,7 @@ async def tidy_before_command(handler, event, data):
     if getattr(getattr(event, 'chat', None), 'type', None) != 'private':
         return
     if (getattr(event, 'text', '') or '').startswith('/'):
+        await clear_flow(event.from_user.id)
         await discard_active_menu(event)
     return await handler(event, data)
 
@@ -255,7 +266,9 @@ async def callbacks(callback: CallbackQuery):
     if not await allowed(uid, callback.message):
         return
     try:
-        if data.startswith('services:'):
+        if data.startswith('ui:'):
+            await button_action(callback, uid, data[3:])
+        elif data.startswith('services:'):
             await services(callback.message, int(data.split(':')[1]), edit=True)
         elif data.startswith('countries:'):
             _, service, page = data.split(':')
@@ -633,7 +646,8 @@ async def show_orders(target, uid, *, edit: bool = False):
                      f'{row.price_charged} {settings.wallet_currency} • /check {row.id}')
     await show_selection_menu(
         target, '\n'.join(lines) if lines else 'No orders yet.',
-        keyboard([[('⬅️ Main menu', 'menu:home')]]), edit=edit,
+        keyboard([[ (f'Order #{row.id} · {row.service.title()}', f'ui:order:{row.id}') ] for row in orders]
+                 + [[('⬅️ Main menu', 'menu:home')]]), edit=edit,
         parse_mode='HTML',
     )
 
@@ -738,7 +752,7 @@ async def check_command(message: Message):
         return
     parts = (message.text or '').split()
     if len(parts) != 2 or not parts[1].isdigit():
-        await message.answer('Usage: /check ORDER_ID (see /orders)')
+        await order_picker(message, message.from_user.id, 'check')
         return
     await check_sms(message, message.from_user.id, int(parts[1]))
 
@@ -925,7 +939,7 @@ async def admin_reconcile_nowpayment(message: Message):
     try:
         parts = message.text.split()
         if len(parts) != 2 or not parts[1].isascii() or not parts[1].isdigit() or len(parts[1]) > 40:
-            return await message.answer('Usage: /reconcilepayment PAYMENT_ID')
+            return await prompt_button_input(message, message.from_user.id, 'reconcilepayment')
         payment_id = parts[1]
         remote = await shop.gateway.get_payment_status(payment_id)
         status = str(remote.get('payment_status', 'unknown')).lower()
@@ -950,6 +964,8 @@ async def admin_reconcile_nowpayment(message: Message):
 async def admin_adjust(message: Message):
     if not admin_only(message):
         return await message.answer('Admin only')
+    if len(message.text.split()) == 1:
+        return await customer_picker(message, message.from_user.id)
     try:
         _, uid, raw, reason = message.text.split(maxsplit=3)
         uid, amount = int(uid), Decimal(raw)
@@ -974,7 +990,7 @@ async def admin_ban(message: Message):
     try:
         uid = int(message.text.split()[1])
     except (IndexError, ValueError):
-        return await message.answer('Usage: /ban USER_ID or /unban USER_ID')
+        return await customer_picker(message, message.from_user.id)
     async with Session.begin() as s:
         user = await s.get(User, uid, with_for_update=True)
         if not user:
@@ -987,6 +1003,8 @@ async def admin_ban(message: Message):
 async def admin_markup(message: Message):
     if not admin_only(message):
         return await message.answer('Admin only')
+    if len(message.text.split()) == 1:
+        return await markup_picker(message)
     try:
         percent = Decimal(message.text.split()[1])
         if not percent.is_finite() or not 0 <= percent <= 500:
@@ -1033,8 +1051,10 @@ async def admin_broadcast(message: Message):
     if not admin_only(message):
         return await message.answer('Admin only')
     parts = message.text.split(maxsplit=1)
-    if len(parts) < 2 or len(parts[1]) > 1000:
-        return await message.answer('Usage: /broadcast TEXT (max 1000 characters)')
+    if len(parts) < 2:
+        return await prompt_button_input(message, message.from_user.id, 'broadcast')
+    if len(parts[1]) > 1000:
+        return await message.answer('Maximum broadcast length is 1000 characters.')
     async with Session() as s:
         ids = (await s.scalars(select(User.id).where(User.is_banned.is_(False)))).all()
     delivered, failed = 0, 0
@@ -1053,6 +1073,8 @@ async def admin_resolve(message: Message):
     """Operator-confirmed manual refund; use only after investigating provider order."""
     if not admin_only(message):
         return await message.answer('Admin only')
+    if len(message.text.split()) == 1:
+        return await review_picker(message)
     try:
         _, raw_id, action = message.text.split(maxsplit=2)
         aid = int(raw_id)
@@ -1170,7 +1192,7 @@ async def order_receipt(message: Message):
         return
     parts = message.text.split()
     if len(parts) != 2 or not parts[1].isdigit() or len(parts[1]) > 9:
-        return await message.answer('Use /receipt ORDER_ID (see /orders).')
+        return await order_picker(message, message.from_user.id, 'receipt')
     async with Session() as s:
         row = await s.get(Activation, int(parts[1]))
         if row is None or row.user_id != message.from_user.id:
@@ -1207,7 +1229,7 @@ async def customer_done(message: Message):
         return
     parts = message.text.split()
     if len(parts) != 2 or not parts[1].isdigit() or len(parts[1]) > 9:
-        return await message.answer('Use /done ORDER_ID after you finish your verification.')
+        return await order_picker(message, message.from_user.id, 'done')
     await mark_customer_done(message, message.from_user.id, int(parts[1]))
 
 
@@ -1231,7 +1253,7 @@ async def customer_support(message: Message):
         return
     parts = message.text.split()
     if len(parts) != 2 or not parts[1].isdigit() or len(parts[1]) > 9:
-        return await message.answer('Use /support ORDER_ID to request a review. Never send codes or passwords.')
+        return await order_picker(message, message.from_user.id, 'support')
     aid, uid = int(parts[1]), message.from_user.id
     created = False
     async with Session.begin() as s:
@@ -1267,7 +1289,7 @@ async def admin_close_ticket(message: Message):
         return
     parts = message.text.split()
     if len(parts) != 2 or not parts[1].isdigit() or len(parts[1]) > 9:
-        return await message.answer('Use /closeticket ORDER_ID after resolving the issue.')
+        return await ticket_picker(message)
     async with Session.begin() as s:
         order = await s.get(Activation, int(parts[1]), with_for_update=True)
         ticket = await s.get(Setting, f'support_order:{int(parts[1])}')
@@ -1288,18 +1310,31 @@ async def admin_maintenance(message: Message):
         return
     parts = message.text.lower().split()
     if len(parts) != 2 or parts[1] not in ('on', 'off'):
-        async with Session() as s:
-            row = await s.get(Setting, 'purchase_maintenance')
-        return await message.answer('Purchase maintenance: ' + (row.value if row else 'off')
-                                    + '\nUse /maintenance on or /maintenance off.')
+        return await maintenance_picker(message)
+    await set_maintenance(parts[1])
+    await maintenance_picker(message)
+
+
+async def set_maintenance(value):
+    if value not in ('on', 'off'):
+        raise ValueError('Invalid maintenance mode')
     async with Session.begin() as s:
         row = await s.get(Setting, 'purchase_maintenance', with_for_update=True)
         if row:
-            row.value = parts[1]
+            row.value = value
         else:
-            s.add(Setting(key='purchase_maintenance', value=parts[1]))
-    await message.answer('Purchase maintenance: ' + parts[1]
-                         + '. Existing orders and refunds remain unaffected.')
+            s.add(Setting(key='purchase_maintenance', value=value))
+
+
+async def maintenance_picker(target, *, edit=False):
+    async with Session() as s:
+        row = await s.get(Setting, 'purchase_maintenance')
+    state = row.value if row else 'off'
+    await show_selection_menu(
+        target, f'🛠 Purchase maintenance: {state.upper()}\n'
+        'Existing orders and refunds remain available.',
+        keyboard([[('🔴 Maintenance ON', 'ui:maint:on'), ('🟢 Maintenance OFF', 'ui:maint:off')],
+                  [('⬅️ Admin Settings', 'admin:settings')]]), edit=edit)
 
 
 @router.message(Command('dailyreport'))
@@ -1328,7 +1363,7 @@ async def admin_customer(message: Message):
         return
     parts = message.text.split()
     if len(parts) != 2 or not parts[1].isdigit() or len(parts[1]) > 16:
-        return await message.answer('Use /customer TELEGRAM_USER_ID.')
+        return await customer_picker(message, message.from_user.id)
     uid = int(parts[1])
     async with Session() as s:
         user = await s.get(User, uid)
@@ -1355,7 +1390,12 @@ async def handle_pending_text(message: Message):
     flow = await read_flow(uid)
     if not flow:
         return
-    if flow.get('type') == 'topup':
+    if flow.get('type') == 'button_input':
+        if uid not in settings.admins:
+            await clear_flow(uid)
+            return
+        await handle_button_input(message, uid, flow, raw)
+    elif flow.get('type') == 'topup':
         if await allowed(uid, message):
             await send_topup_invoice(message, uid, raw)
     elif flow.get('type') == 'price':
