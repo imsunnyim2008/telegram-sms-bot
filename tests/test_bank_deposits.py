@@ -160,3 +160,26 @@ async def test_name_only_reuses_quote_and_checks_actual_bank_time(setup_database
     async with session() as s:
         assert len((await s.scalars(select(BankDeposit))).all()) == 1
         assert (await s.get(User,99)).balance == Decimal('10.00')
+
+
+@pytest.mark.asyncio
+async def test_customer_bank_flow_has_copy_buttons_and_one_verification_method(setup_database, monkeypatch):
+    from app import handlers
+    session, _, _ = setup_database
+    await configure(session, monkeypatch)
+    msg = fixtures.Target(uid=99)
+    await handlers.bank_button(msg, 99, ['bankstart'])
+    msg.text = '600'
+    await handlers.handle_pending_text(msg)
+    buttons = [b for row in msg.answers[-1][1]['reply_markup'].inline_keyboard for b in row]
+    assert [b.text for b in buttons if b.copy_text] == ['📋 Copy account number', '📋 Copy transfer remark']
+    paid = next(b for b in buttons if b.text == '✅ I Have Paid')
+    assert not any('Session ID' in b.text or 'Transaction no.' in b.text for b in buttons)
+    await handlers.bank_button(msg, 99, paid.callback_data.split(':')[1:])
+    assert 'full name' in msg.edits[-1][0]
+    msg.text = 'Test Sender'
+    await handlers.handle_pending_text(msg)
+    assert 'Verification pending' in msg.answers[-1][0]
+    async with session() as s:
+        rows = (await s.scalars(select(BankDeposit))).all()
+        assert len(rows) == 1 and rows[0].method == 'name'
