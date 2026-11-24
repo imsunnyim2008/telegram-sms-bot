@@ -11,6 +11,7 @@ from .auto_maintenance import mark_notice_sent, observe, pending_notices
 from .config import settings
 from .db import Activation, MaintenanceNotice, Payment, Session, Setting, User, utcnow
 from .provider import ProviderError
+from .operations import reconcile_inbox, schedule_daily_report, send_notices
 from .service_ui import app_label_html
 from .textverified_webhooks import prune_old_receipts
 
@@ -49,13 +50,16 @@ class Worker:
             except Exception:
                 log.exception('Polling failed for order %s', aid)
         await self.deliver_maintenance_notices()
+        await send_notices(Session, self.shop)
         if self._loops % 6 == 0:
             await self.poll_payments()
+            await reconcile_inbox(Session, self.shop)
         if self._loops % 12 == 0:
             await self.fix_orphan_orders()
+            await schedule_daily_report(Session)
+            await self.low_balance_alert()
         if self._loops % 720 == 0:
             await self.cleanup()
-            await self.low_balance_alert()
 
 
     async def deliver_maintenance_notices(self):
@@ -242,15 +246,13 @@ class Worker:
             return
         if provider_status in {'CANCELED', 'CANCELLED', 'EXPIRED', 'TIMEOUT', 'BANNED'}:
             outcome = 'expired' if provider_status in {'EXPIRED', 'TIMEOUT'} else 'cancelled'
-            if await self.shop.refund(aid, outcome):
-                await self.shop.notifier.send(user_id, f'Order #{aid} expired or was cancelled. Full refund issued.')
+            await self.shop.refund(aid, outcome)
             return
         if utcnow() >= expires:
             try:
                 res = await provider.cancel(oid)
                 if str(res.get('status', '')).upper() in {'CANCELED', 'CANCELLED'}:
-                    if await self.shop.refund(aid, 'expired'):
-                        await self.shop.notifier.send(user_id, f'Order #{aid} expired. Full refund issued.')
+                    await self.shop.refund(aid, 'expired')
             except ProviderError:
                 # Never refund on an unconfirmed provider cancellation; retry next tick.
                 pass
@@ -342,7 +344,11 @@ class Worker:
             balance = await self.shop.provider.get_balance()
         except Exception:
             return
-        if balance >= settings.provider_low_balance_alert:
+        async with Session() as s:
+            row = await s.get(Setting, 'provider_low_balance_threshold')
+        from decimal import Decimal
+        threshold = Decimal(row.value) if row else settings.provider_low_balance_alert
+        if balance >= threshold:
             return
         today = utcnow().date().isoformat()
         async with Session.begin() as s:
@@ -353,4 +359,4 @@ class Worker:
                 entry.value = today
             else:
                 s.add(Setting(key='low_balance_alert_day', value=today))
-        await self.shop.alert_admins(f'Low provider balance; top up your {settings.provider_name} wallet.')
+        await self.shop.alert_admins(f'Low {settings.provider_name} balance: {balance} raw units (alert threshold {threshold}).')
