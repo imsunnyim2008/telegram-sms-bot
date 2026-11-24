@@ -19,7 +19,7 @@ from .config import settings
 from .country_ui import arrange_country_offers, country_flag
 from .command_menu import PUBLIC_HELP, ADMIN_HELP
 from .db import Activation, AdminAudit, LedgerEntry, Payment, Session, Setting, SupportMessage, User, utcnow
-from .operations import LAGOS, audit, claim_purchase, notice, report, risk_summary
+from .operations import LAGOS, STARTED_AT, audit, claim_purchase, notice, report, risk_summary
 from .auto_maintenance import acknowledge, manual_mode
 from .ledger import InsufficientFunds, apply
 from .service_ui import (app_label_html, custom_emoji_unavailable,
@@ -1804,6 +1804,7 @@ async def operations_button(target, uid, parts):
                                   f'TextVerified: {tv}\nLast sample: {str(age)+"s ago" if age is not None else "none"}\n'
                                   f'Payment gateway: {gateway.value if gateway else "not sampled"}\n'
                                   f'Purchase maintenance: {pause.value if pause else "off"}\n'
+                                  f'Process uptime: {int((time.monotonic()-STARTED_AT)//60)} min\n'
                                   'Monitoring is available while the host is running.',
                                   keyboard([[('Refresh', 'ui:health'), ('⬅️ Admin Settings', 'admin:settings')]]), edit=True)
     else:
