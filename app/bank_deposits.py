@@ -5,7 +5,7 @@ import re
 from datetime import timedelta
 from decimal import Decimal, InvalidOperation, ROUND_DOWN
 
-from sqlalchemy import or_, select
+from sqlalchemy import select
 from sqlalchemy.exc import IntegrityError
 
 from .config import settings
