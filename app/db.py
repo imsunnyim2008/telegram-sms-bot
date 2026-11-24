@@ -169,6 +169,14 @@ class BankEventMatch(Base):
     sender_key: Mapped[str | None] = mapped_column(String(64), index=True)
 
 
+class BankEventAlias(Base):
+    """Optional bank identifiers from signed events; never persist raw narration or names."""
+    __tablename__ = 'bank_event_aliases'
+    event_key: Mapped[str] = mapped_column(ForeignKey('moniepoint_events.event_key'), primary_key=True)
+    kind: Mapped[str] = mapped_column(String(16), primary_key=True)
+    digest: Mapped[str] = mapped_column(String(64), primary_key=True, index=True)
+
+
 class BankDeposit(Base):
     __tablename__ = 'bank_deposits'
     id: Mapped[int] = mapped_column(Integer, primary_key=True)

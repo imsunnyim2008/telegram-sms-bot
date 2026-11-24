@@ -1808,7 +1808,7 @@ async def bank_button(target, uid, parts):
                 f'🏦 Moniepoint bank transfer\nEnter any positive amount in naira (up to two decimal places).\n'
                 f'Exchange rate: NGN {cfg["rate"]} per USD.\nNo $5 minimum for bank transfers.',
                 keyboard([[('Cancel', 'ui:opcancel')]]), edit=True)
-    elif name == 'bankmethod' and len(parts) == 3 and parts[1] in ('id', 'name'):
+    elif name == 'bankmethod' and len(parts) == 3 and parts[1] in ('id', 'name', 'session'):
         # The quote is persisted separately from button flow, which is cleared on navigation.
         async with Session() as s:
             quote = await s.get(Setting, f'bankquote:{uid}')
@@ -1821,15 +1821,21 @@ async def bank_button(target, uid, parts):
             else:
                 await save_flow(uid, {'type': 'bank_input', 'action': 'claim', 'method': parts[1], **q})
                 await show_selection_menu(target,
-                    'Enter the exact transaction ID from your transfer receipt.' if parts[1]=='id'
-                    else 'Enter the full sender name as shown on the bank transfer. Name matching requires review.',
+                    {'id': 'Enter the transaction number or transaction reference from your receipt.',
+                     'session': 'Enter the 30-digit Session ID from your receipt.',
+                     'name': 'Enter the full sender name as shown on the transfer. Name matching requires review.'}[parts[1]],
                     keyboard([[('Cancel', 'ui:opcancel')]]), edit=True)
     elif name == 'bankclaims':
         async with Session() as s:
             rows = (await s.scalars(select(BankDeposit).where(BankDeposit.user_id == uid)
                                     .order_by(BankDeposit.id.desc()).limit(10))).all()
-        body = 'Your bank deposit claims\n' + ('\n'.join(
-            f'#{r.id}: NGN {Decimal(r.amount_kobo)/100:.2f} · {r.status}' for r in rows) or 'No claims yet.')
+        lines = []
+        for r in rows:
+            state = r.status
+            if state == 'pending' and len(await bank.candidates(Session, r.id)) == 1:
+                state = 'matched — awaiting settlement review'
+            lines.append(f'#{r.id}: NGN {Decimal(r.amount_kobo)/100:.2f} · {state}')
+        body = 'Your bank deposit claims\n' + ('\n'.join(lines) or 'No claims yet.')
         await show_selection_menu(target, body, keyboard([[('⬅️ Main menu', 'menu:home')]]), edit=True)
     elif uid not in settings.admins:
         return False
@@ -1890,8 +1896,10 @@ async def bank_input(message,uid,flow,raw):
             raise ValueError('Bank deposits are unavailable.')
         if action=='amount':
             kobo=bank.amount_kobo(raw)
+            remark = bank.new_remark()
+            claim = await bank.create_claim(Session, uid, kobo, cfg['rate'], 'remark', remark)
             q={'kobo':kobo,'rate':cfg['rate'],'nonce':token_hex(6),'expires':time.time()+86400,
-               'account':cfg['account'],'name':cfg['name']}
+               'account':cfg['account'],'name':cfg['name'], 'remark_claim':claim}
             async with Session.begin() as s:
                 row=await s.get(Setting,f'bankquote:{uid}',with_for_update=True)
                 if row:
@@ -1902,8 +1910,12 @@ async def bank_input(message,uid,flow,raw):
             return await show_selection_menu(message,
                 f'🇳🇬 Transfer to Moniepoint\nAccount name: {cfg["name"]}\nAccount number: {cfg["account"]}\n'
                 f'Amount: NGN {Decimal(kobo)/100:.2f}\nRate: NGN {cfg["rate"]}/USD\n'
-                'After sending, choose how to verify your transfer. Never send an OTP or bank password.',
-                keyboard([[('Transaction ID',f'ui:bankmethod:id:{q["nonce"]}')],
+                f'Your unique transfer remark (copy exactly):\n{remark}\n\n'
+                f'Claim #{claim}. Friday checks signed bank events for the exact remark and amount. '
+                'If the remark is missing, use a receipt identifier below. Settlement review is required. Never send an OTP or bank password.',
+                keyboard([[('Check deposit status','ui:bankclaims')],
+                          [('Transaction no. / reference',f'ui:bankmethod:id:{q["nonce"]}')],
+                          [('Session ID',f'ui:bankmethod:session:{q["nonce"]}')],
                           [('Sender full name',f'ui:bankmethod:name:{q["nonce"]}')],
                           [('Cancel','ui:opcancel')]]))
         if action=='claim':
