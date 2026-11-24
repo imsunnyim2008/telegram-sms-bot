@@ -1,11 +1,13 @@
 """Crash-resumable polling: every outstanding order is recovered from PostgreSQL."""
 import asyncio
 import logging
+import time
 from datetime import timedelta, timezone
 from html import escape
 
 from sqlalchemy import delete, select
 
+from .auto_maintenance import mark_notice_sent, observe, pending_notices
 from .config import settings
 from .db import Activation, MaintenanceNotice, Payment, Session, Setting, User, utcnow
 from .provider import ProviderError
@@ -47,8 +49,6 @@ class Worker:
             except Exception:
                 log.exception('Polling failed for order %s', aid)
         await self.deliver_maintenance_notices()
-        if self._loops == 1 or self._loops % 24 == 0:
-            await self.check_api_health()
         if self._loops % 6 == 0:
             await self.poll_payments()
         if self._loops % 12 == 0:
@@ -93,6 +93,57 @@ class Worker:
                     row.next_attempt_at = utcnow() + timedelta(minutes=1)
             await asyncio.sleep(.06)
 
+    async def run_health_monitor(self):
+        # Independent of SMS polling. Start a fresh check every minute while online.
+        while True:
+            started = time.monotonic()
+            try:
+                await self.check_api_health()
+            except asyncio.CancelledError:
+                raise
+            except Exception:
+                log.exception('API health monitor iteration failed')
+            await asyncio.sleep(max(0, 60 - (time.monotonic() - started)))
+
+    async def textverified_health(self):
+        async def probe(operation):
+            try:
+                await asyncio.wait_for(operation(), timeout=45)
+                return True
+            except Exception:
+                return False
+
+        balance, catalogue = await asyncio.gather(
+            probe(self.shop.provider.get_balance),
+            probe(lambda: self.shop.provider.get_prices(fresh=True)),
+        )
+        await observe(Session, balance and catalogue, utcnow().timestamp())
+        for notice in await pending_notices(Session):
+            event = notice['event']
+            incident = notice.get('incident')
+            messages = {
+                'outage': ('🚨 FRIDAY: TextVerified outage detected.\n'
+                           f'Incident: {incident}\n'
+                           'Acknowledge this alert or reply directly to it. If the API is still down '
+                           'after 30 minutes without acknowledgment, new purchases will automatically pause.'),
+                'paused': '🛠 FRIDAY automatically enabled purchase maintenance after 30 minutes without acknowledgment. Customers will be notified.',
+                'recovering': '🟡 TextVerified is responding again. Friday will resume automatically after 10 continuous minutes of successful checks, unless you take manual control.',
+                'recovered': '🟢 TextVerified API is responding again.',
+                'resumed': '🟢 FRIDAY automatically disabled purchase maintenance after 10 continuous minutes of healthy TextVerified checks. Customers will be notified.',
+            }
+            for admin in settings.admins:
+                if admin in notice.get('sent', []):
+                    continue
+                try:
+                    if event == 'outage' and hasattr(self.shop.notifier, 'send_api_alert'):
+                        await self.shop.notifier.send_api_alert(admin, messages[event], incident)
+                    else:
+                        await self.shop.notifier.send(admin, messages[event])
+                except Exception:
+                    log.warning('TextVerified alert delivery failed')
+                    continue
+                await mark_notice_sent(Session, notice['id'], admin, settings.admins)
+
     async def check_api_health(self):
         async def probe(label, operation):
             try:
@@ -133,14 +184,21 @@ class Worker:
                     else:
                         s.add(Setting(key=key, value=value))
 
+        jobs = []
         if settings.provider_credentials_ready:
-            await probe(settings.provider_name + ' balance', self.shop.provider.get_balance)
-            await probe(settings.provider_name + ' catalogue', self.shop.provider.get_prices)
+            if settings.provider_name == 'textverified':
+                jobs.append(self.textverified_health())
+            else:
+                jobs.extend([
+                    probe(settings.provider_name + ' balance', self.shop.provider.get_balance),
+                    probe(settings.provider_name + ' catalogue', self.shop.provider.get_prices),
+                ])
         if settings.payment_ready:
             if settings.payment_provider == 'nowpayments':
-                await probe('NOWPayments', self.shop.gateway.check_credentials)
+                jobs.append(probe('NOWPayments', self.shop.gateway.check_credentials))
             else:
-                await probe('CryptoBot', lambda: self.shop.gateway._call('getMe', {}))
+                jobs.append(probe('CryptoBot', lambda: self.shop.gateway._call('getMe', {})))
+        await asyncio.gather(*jobs)
 
     async def poll_order(self, aid: int):
         async with Session() as s:
