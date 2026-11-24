@@ -90,7 +90,7 @@ async def test_admin_settings_only_in_admin_main_menu(monkeypatch):
     assert '⚙️ Admin Settings' in admin_buttons
     assert '⚙️ Admin Settings' not in guest_buttons
     assert guest_buttons == ['📱 Buy number', '💰 Balance', '💳 Top up', '📋 My orders',
-                             '📜 History', '💸 Refunds', '👤 My account', '🎧 Support',
+                             '📜 History', '💸 Refunds', '💳 My deposits', '👤 My account', '🎧 Support',
                              '❓ Help', '🧹 Clear chat']
 
 
