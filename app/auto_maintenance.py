@@ -7,6 +7,7 @@ from sqlalchemy.dialects.postgresql import insert as pg_insert
 from sqlalchemy.dialects.sqlite import insert as sqlite_insert
 
 from .db import MaintenanceNotice, Setting, User, utcnow
+from .operations import audit
 
 KEY = 'textverified_auto_state'
 
@@ -38,7 +39,7 @@ async def set_mode(s, value):
     return True
 
 
-async def manual_mode(session, value):
+async def manual_mode(session, value, *, actor=None):
     if value not in ('on', 'off'):
         raise ValueError('Invalid maintenance mode')
     async with session.begin() as s:
@@ -48,6 +49,8 @@ async def manual_mode(session, value):
         if state.get('incident'):
             state['ack'] = True
         row.value = json.dumps(state)
+        if actor is not None:
+            audit(s, actor, 'maintenance', value)
         return await set_mode(s, value)
 
 
