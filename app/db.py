@@ -178,6 +178,7 @@ class BankDeposit(Base):
     credit: Mapped[Decimal] = mapped_column(Numeric(16, 4))
     method: Mapped[str] = mapped_column(String(8))
     match_key: Mapped[str] = mapped_column(String(64))
+    alternate_key: Mapped[str | None] = mapped_column(String(64))
     status: Mapped[str] = mapped_column(String(16), default='pending', index=True)
     verified_transaction: Mapped[str | None] = mapped_column(String(64), unique=True)
     payment_id: Mapped[int | None] = mapped_column(ForeignKey('payments.id'), unique=True)
