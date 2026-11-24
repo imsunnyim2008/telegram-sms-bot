@@ -155,6 +155,14 @@ class Worker:
                 healthy = True
             except Exception:
                 healthy = False
+            if label in ('NOWPayments', 'CryptoBot'):
+                async with Session.begin() as s:
+                    row = await s.get(Setting, 'ops_gateway_health', with_for_update=True)
+                    value = f'{label}: {"healthy" if healthy else "unavailable"} • {utcnow():%Y-%m-%d %H:%M:%S} UTC'
+                    if row:
+                        row.value = value
+                    else:
+                        s.add(Setting(key='ops_gateway_health', value=value))
             for admin in settings.admins:
                 key = f'api_health:{label}:{admin}'
                 now = utcnow()
