@@ -122,7 +122,8 @@ class Worker:
                 await self.shop.notifier.send(
                     user_id,
                     f'🔐 Your verification code for order #{aid}: {escape(str(code))}\n'
-                    f'App: {app_label_html(service)}',
+                    f'App: {app_label_html(service)}\n'
+                    f'After using the code, confirm with /done {aid}.',
                     parse_mode='HTML',
                 )
             except Exception:
