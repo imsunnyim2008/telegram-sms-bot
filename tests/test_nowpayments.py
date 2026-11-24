@@ -267,6 +267,10 @@ async def test_ipn_webhook_accepts_signed_event_without_invoice_id(monkeypatch):
     async def processor(order_id, invoice_id, payment_id):
         calls.append((order_id, invoice_id, payment_id))
     monkeypatch.setattr(main, 'process_nowpayments_payment', processor)
+    queued = []
+    async def enqueue(session, payment_id, invoice_id, order_id):
+        queued.append((order_id, invoice_id, payment_id))
+    monkeypatch.setattr(main, 'accept_finished_ipn', enqueue)
     event = {'payment_id': 333, 'invoice_id': None, 'order_id': 'friday-topup-99',
              'payment_status': 'finished'}
     raw = json.dumps(event).encode()
@@ -278,6 +282,7 @@ async def test_ipn_webhook_accepts_signed_event_without_invoice_id(monkeypatch):
                 headers={'x-nowpayments-sig':signature,'content-type':'application/json'})
         assert response.status_code == 200
         assert calls == [('friday-topup-99', None, '333')]
+        assert queued == calls
         invalid = await client.post('/webhook/nowpayments', content=raw,
                 headers={'x-nowpayments-sig':'invalid','content-type':'application/json'})
         assert invalid.status_code == 401
