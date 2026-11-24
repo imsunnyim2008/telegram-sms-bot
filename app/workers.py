@@ -5,12 +5,13 @@ import time
 from datetime import timedelta, timezone
 from html import escape
 
-from sqlalchemy import delete, select
+from sqlalchemy import delete, func, or_, select
 
 from .auto_maintenance import mark_notice_sent, observe, pending_notices
 from .config import settings
-from .db import Activation, MaintenanceNotice, Payment, Session, Setting, User, utcnow
+from .db import Activation, MaintenanceNotice, OpsNotice, Payment, Session, Setting, User, utcnow
 from .provider import ProviderError
+from .operations import reconcile_inbox, schedule_daily_report, schedule_risk_alert, send_notices
 from .service_ui import app_label_html
 from .textverified_webhooks import prune_old_receipts
 
@@ -55,7 +56,6 @@ class Worker:
             await self.fix_orphan_orders()
         if self._loops % 720 == 0:
             await self.cleanup()
-            await self.low_balance_alert()
 
 
     async def deliver_maintenance_notices(self):
@@ -92,6 +92,23 @@ class Worker:
                     row.attempts += 1
                     row.next_attempt_at = utcnow() + timedelta(minutes=1)
             await asyncio.sleep(.06)
+
+    async def run_operations(self):
+        last_periodic = -1000.0
+        while True:
+            try:
+                await send_notices(Session, self.shop)
+                if time.monotonic() - last_periodic >= 60:
+                    last_periodic = time.monotonic()
+                    await asyncio.gather(reconcile_inbox(Session, self.shop),
+                                         schedule_daily_report(Session),
+                                         schedule_risk_alert(Session),
+                                         self.low_balance_alert())
+            except asyncio.CancelledError:
+                raise
+            except Exception:
+                log.exception('Operations worker iteration failed')
+            await asyncio.sleep(5)
 
     async def run_health_monitor(self):
         # Independent of SMS polling. Start a fresh check every minute while online.
@@ -151,6 +168,14 @@ class Worker:
                 healthy = True
             except Exception:
                 healthy = False
+            if label in ('NOWPayments', 'CryptoBot'):
+                async with Session.begin() as s:
+                    row = await s.get(Setting, 'ops_gateway_health', with_for_update=True)
+                    value = f'{label}: {"healthy" if healthy else "unavailable"} • {utcnow():%Y-%m-%d %H:%M:%S} UTC'
+                    if row:
+                        row.value = value
+                    else:
+                        s.add(Setting(key='ops_gateway_health', value=value))
             for admin in settings.admins:
                 key = f'api_health:{label}:{admin}'
                 now = utcnow()
@@ -242,15 +267,13 @@ class Worker:
             return
         if provider_status in {'CANCELED', 'CANCELLED', 'EXPIRED', 'TIMEOUT', 'BANNED'}:
             outcome = 'expired' if provider_status in {'EXPIRED', 'TIMEOUT'} else 'cancelled'
-            if await self.shop.refund(aid, outcome):
-                await self.shop.notifier.send(user_id, f'Order #{aid} expired or was cancelled. Full refund issued.')
+            await self.shop.refund(aid, outcome)
             return
         if utcnow() >= expires:
             try:
                 res = await provider.cancel(oid)
                 if str(res.get('status', '')).upper() in {'CANCELED', 'CANCELLED'}:
-                    if await self.shop.refund(aid, 'expired'):
-                        await self.shop.notifier.send(user_id, f'Order #{aid} expired. Full refund issued.')
+                    await self.shop.refund(aid, 'expired')
             except ProviderError:
                 # Never refund on an unconfirmed provider cancellation; retry next tick.
                 pass
@@ -323,13 +346,15 @@ class Worker:
         cutoff = utcnow() - timedelta(days=1)
         async with Session.begin() as s:
             rows = (await s.scalars(select(Activation).where(
-                Activation.completed_at < cutoff,
-                Activation.status == 'completed',
-                Activation.code.is_not(None)).limit(1000))).all()
+                func.coalesce(Activation.completed_at, Activation.created_at) < cutoff,
+                Activation.status.in_(('completed', 'cancelled', 'expired', 'failed')),
+                or_(Activation.code.is_not(None), Activation.phone.is_not(None))).limit(1000))).all()
             for row in rows:
                 row.code = None
                 row.phone = None
         async with Session.begin() as s:
+            await s.execute(delete(OpsNotice).where(OpsNotice.status.in_(('sent', 'failed')),
+                            OpsNotice.created_at < utcnow() - timedelta(days=30)))
             await s.execute(delete(MaintenanceNotice).where(
                 MaintenanceNotice.status != 'pending',
                 MaintenanceNotice.created_at < utcnow() - timedelta(days=7)))
@@ -342,7 +367,11 @@ class Worker:
             balance = await self.shop.provider.get_balance()
         except Exception:
             return
-        if balance >= settings.provider_low_balance_alert:
+        async with Session() as s:
+            row = await s.get(Setting, 'provider_low_balance_threshold')
+        from decimal import Decimal
+        threshold = Decimal(row.value) if row else settings.provider_low_balance_alert
+        if balance >= threshold:
             return
         today = utcnow().date().isoformat()
         async with Session.begin() as s:
@@ -353,4 +382,4 @@ class Worker:
                 entry.value = today
             else:
                 s.add(Setting(key='low_balance_alert_day', value=today))
-        await self.shop.alert_admins(f'Low provider balance; top up your {settings.provider_name} wallet.')
+        await self.shop.alert_admins(f'Low {settings.provider_name} balance: {balance} raw units (alert threshold {threshold}).')

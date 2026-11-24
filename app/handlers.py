@@ -4,7 +4,7 @@ import json
 import logging
 import time
 from secrets import token_hex
-from datetime import timezone
+from datetime import timedelta, timezone
 from decimal import Decimal, InvalidOperation
 from html import escape
 
@@ -12,13 +12,14 @@ from aiogram import F, Router
 from aiogram.exceptions import TelegramBadRequest
 from aiogram.filters import Command, CommandStart
 from aiogram.types import CallbackQuery, InlineKeyboardButton, InlineKeyboardMarkup, Message
-from sqlalchemy import func, select
+from sqlalchemy import String, cast, func, select
 
 from .business import BotError
 from .config import settings
 from .country_ui import arrange_country_offers, country_flag
 from .command_menu import PUBLIC_HELP, ADMIN_HELP
-from .db import Activation, LedgerEntry, Session, Setting, User, utcnow
+from .db import Activation, AdminAudit, LedgerEntry, Payment, Session, Setting, SupportMessage, User, utcnow
+from .operations import LAGOS, STARTED_AT, audit, claim_purchase, notice, report, risk_summary
 from .auto_maintenance import acknowledge, manual_mode
 from .ledger import InsufficientFunds, apply
 from .service_ui import (app_label_html, custom_emoji_unavailable,
@@ -45,6 +46,7 @@ MAIN = keyboard([
     [('📱 Buy number', 'services:0'), ('💰 Balance', 'balance')],
     [('💳 Top up', 'topup'), ('📋 My orders', 'orders')],
     [('📜 History', 'ui:history'), ('💸 Refunds', 'ui:refunds')],
+    [('💳 My deposits', 'ui:deposits')],
     [('👤 My account', 'ui:account'), ('🎧 Support', 'ui:support')],
     [('❓ Help', 'help'), ('🧹 Clear chat', 'ui:clear')],
 ])
@@ -53,6 +55,7 @@ MAIN_ADMIN = keyboard([
     [('📱 Buy number', 'services:0'), ('💰 Balance', 'balance')],
     [('💳 Top up', 'topup'), ('📋 My orders', 'orders')],
     [('📜 History', 'ui:history'), ('💸 Refunds', 'ui:refunds')],
+    [('💳 My deposits', 'ui:deposits')],
     [('👤 My account', 'ui:account'), ('🎧 Support', 'ui:support')],
     [('❓ Help', 'help'), ('🧹 Clear chat', 'ui:clear')],
     [('⚙️ Admin Settings', 'admin:settings')],
@@ -67,7 +70,10 @@ def admin_settings_keyboard() -> InlineKeyboardMarkup:
     return keyboard([
         [('💵 Change Public Prices', 'ps:services:0'), ('📈 Markup', 'ui:markup')],
         [('🛠 Maintenance', 'ui:maintenance'), ('📊 Business stats', 'ui:stats')],
-        [('🗓 Daily report', 'ui:dailyreport'), ('🧪 System check', 'ui:testall')],
+        [('🗓 Reports', 'ui:reports'), ('🧪 System check', 'ui:testall')],
+        [('🛡 Risk review', 'ui:risk'), ('📜 Admin activity', 'ui:audit')],
+        [('🔍 Find customer', 'ui:searchcustomer'), ('💵 Low balance alert', 'ui:lowthreshold')],
+        [('📡 Health dashboard', 'ui:health')],
         [('🔌 API setup check', 'ui:setupcheck'), ('👥 Customers', 'ui:customers')],
         [('🎧 Support tickets', 'ui:tickets'), ('💳 Reconcile payment', 'ui:reconcilepayment')],
         [('📣 Broadcast', 'ui:broadcast'), ('⚖️ Review orders', 'ui:review')],
@@ -294,6 +300,13 @@ async def callbacks(callback: CallbackQuery):
             await remove_previous_menu(callback.message)
         elif data.startswith('buy:'):
             _, service, country = data.split(':')
+            message_id = getattr(callback.message, 'message_id', None)
+            if isinstance(message_id, int) and message_id > 0:
+                date = getattr(callback.message, 'date', None)
+                if date and (utcnow() - date).total_seconds() > 86400:
+                    return await callback.message.answer('Purchase confirmation expired. Open Buy number again.')
+                if not await claim_purchase(Session, uid, message_id):
+                    return await callback.message.answer('This confirmation was already processed. Check My orders.')
             order = await shop.buy(uid, service, country)
             await send_branded_message(
                 callback.message,
@@ -346,7 +359,7 @@ async def callbacks(callback: CallbackQuery):
                                              edit=True)
                 elif parts[1] == 'reset' and len(parts) == 4:
                     await admin_price_reset(callback.message, parts[2], parts[3],
-                                            edit=True)
+                                            edit=True, actor=uid)
                 else:
                     await callback.message.answer('Invalid selection. Use /setprice.')
         elif data == 'clear:confirm':
@@ -573,13 +586,15 @@ async def admin_price_prompt(target, uid: int, service: str, country: str,
     )
 
 
-async def admin_price_reset(target, service: str, country: str, *, edit: bool = False):
+async def admin_price_reset(target, service: str, country: str, *, edit: bool = False, actor=None):
     if not settings.service_allowed(service) or not settings.country_allowed(country):
         raise BotError('Invalid price selection')
     async with Session.begin() as s:
         row = await s.get(Setting, f'price:{service}:{country}')
         if row:
             await s.delete(row)
+        if actor is not None:
+            audit(s, actor, 'price_reset', f'{service}:{country}')
     await show_selection_menu(
         target, '✅ Custom public price reset. Global markup will apply to new purchases.',
         keyboard([[('💵 Change another price', 'ps:services:0')],
@@ -614,6 +629,7 @@ async def admin_price_save(target, uid: int, flow: dict, raw: str):
             row.value = str(value)
         else:
             s.add(Setting(key=key, value=str(value)))
+        audit(s, uid, 'price_set', f'{service}:{country}:{value}')
     await clear_flow(uid)
     await show_selection_menu(
         target,
@@ -635,10 +651,20 @@ async def show_balance(target, uid, *, edit: bool = False):
     )
 
 
-async def show_orders(target, uid, *, edit: bool = False):
+async def show_orders(target, uid, *, edit: bool = False, state='all'):
     async with Session() as s:
-        orders = (await s.scalars(select(Activation).where(Activation.user_id == uid)
-                                  .order_by(Activation.id.desc()).limit(10))).all()
+        query = select(Activation).where(Activation.user_id == uid)
+        if state == 'active':
+            query = query.where(Activation.status.in_(('pending', 'ordering', 'received', 'manual_review')))
+        elif state == 'completed':
+            query = query.where(Activation.status == 'completed')
+        elif state == 'refunded':
+            query = query.where(Activation.status.in_(('cancelled', 'expired', 'failed')),
+                                Activation.id.in_(select(Activation.id).join(LedgerEntry,
+                                    (LedgerEntry.user_id == uid) & (LedgerEntry.ref_type == 'activation') &
+                                    (LedgerEntry.ref_id == cast(Activation.id, String)) &
+                                    (LedgerEntry.type == 'refund'))))
+        orders = (await s.scalars(query.order_by(Activation.id.desc()).limit(10))).all()
     lines = []
     for row in orders:
         number = row.phone if row.status in ('pending', 'ordering', 'received') else (
@@ -650,7 +676,9 @@ async def show_orders(target, uid, *, edit: bool = False):
     await show_selection_menu(
         target, '\n'.join(lines) if lines else 'No orders yet.',
         keyboard([[ (f'Order #{row.id} · {row.service.title()}', f'ui:order:{row.id}') ] for row in orders]
-                 + [[('⬅️ Main menu', 'menu:home')]]), edit=edit,
+                 + [[('All', 'ui:filterorders:all'), ('Active', 'ui:filterorders:active')],
+                    [('Completed', 'ui:filterorders:completed'), ('Refunded', 'ui:filterorders:refunded')],
+                    [('⬅️ Main menu', 'menu:home')]]), edit=edit,
         parse_mode='HTML',
     )
 
@@ -955,6 +983,8 @@ async def admin_reconcile_nowpayment(message: Message):
         invoice_id = str(invoice_id) if invoice_id is not None else None
         credited = await shop.verify_and_credit_nowpayments(
             invoice_id, payment_id, order_id=order_id)
+        async with Session.begin() as s:
+            audit(s, message.from_user.id, 'reconcile_payment', f'{payment_id}:{credited}')
         await message.answer(
             'Payment confirmed and wallet credited once.' if credited
             else 'Payment already credited or payment details failed strict matching. Check /testall.')
@@ -978,7 +1008,9 @@ async def admin_adjust(message: Message):
             if not await s.get(User, uid):
                 raise BotError('User has not started the bot')
             from uuid import uuid4
-            await apply(s, uid, amount, 'admin_adjust', 'manual', uuid4().hex, reason)
+            ref = uuid4().hex
+            await apply(s, uid, amount, 'admin_adjust', 'manual', ref, reason)
+            audit(s, message.from_user.id, 'wallet_adjust', f'{uid}:{ref}')
         await message.answer('Balance adjustment applied and recorded in ledger.')
     except (ValueError, InvalidOperation, InsufficientFunds):
         await message.answer('Usage: /adjust USER_ID AMOUNT reason (negative for debit).')
@@ -999,6 +1031,7 @@ async def admin_ban(message: Message):
         if not user:
             return await message.answer('User not found')
         user.is_banned = message.text.split()[0].lower() == '/ban'
+        audit(s, message.from_user.id, 'ban' if user.is_banned else 'unban', uid)
     await message.answer('Account status updated.')
 
 
@@ -1020,6 +1053,7 @@ async def admin_markup(message: Message):
             row.value = str(percent)
         else:
             s.add(Setting(key='markup_percent', value=str(percent)))
+        audit(s, message.from_user.id, 'markup', str(percent))
     await message.answer(f'Markup set to {percent}%')
 
 
@@ -1068,6 +1102,8 @@ async def admin_broadcast(message: Message):
         except Exception:
             failed += 1
         await asyncio.sleep(.045)
+    async with Session.begin() as s:
+        audit(s, message.from_user.id, 'broadcast', f'delivered={delivered};failed={failed}')
     await message.answer(f'Broadcast finished: delivered {delivered}, failed {failed}')
 
 
@@ -1088,6 +1124,8 @@ async def admin_resolve(message: Message):
             if not row or row.status != 'manual_review':
                 return await message.answer('Order is not under manual review')
         if await shop.refund(aid, 'failed'):
+            async with Session.begin() as s:
+                audit(s, message.from_user.id, 'manual_refund', aid)
             await message.answer(f'Order #{aid} refunded; confirm external provider allocation separately.')
             await shop.alert_admins(f'Manual order #{aid} refund authorized by admin {message.from_user.id}.')
         else:
@@ -1272,7 +1310,9 @@ async def customer_support(message: Message):
             await shop.alert_admins(f'Customer requested support review for order #{aid}. Use /tickets.')
         except Exception:
             log.warning('Support notification failed; ticket remains stored.')
-    await message.answer(f'Support request for order #{aid} recorded. Do not share your verification code.')
+    await message.answer(f'Support request for order #{aid} recorded. Do not share your verification code.',
+                         reply_markup=keyboard([[('✏️ Describe issue', f'ui:supportwrite:{aid}'),
+                                                 ('📜 View replies', f'ui:thread:{aid}')]]))
 
 
 @router.message(Command('tickets'))
@@ -1295,6 +1335,7 @@ async def admin_close_ticket(message: Message):
         if order is None or ticket is None:
             return await message.answer('Ticket not found.')
         await s.delete(ticket)
+        audit(s, message.from_user.id, 'close_ticket', order.id)
         uid = order.user_id
     try:
         await shop.notifier.send(uid, f'Support review for order #{parts[1]} was closed. Use /orders for its status.')
@@ -1310,12 +1351,12 @@ async def admin_maintenance(message: Message):
     parts = message.text.lower().split()
     if len(parts) != 2 or parts[1] not in ('on', 'off'):
         return await maintenance_picker(message)
-    await set_maintenance(parts[1])
+    await set_maintenance(parts[1], actor=message.from_user.id)
     await maintenance_picker(message)
 
 
-async def set_maintenance(value):
-    return await manual_mode(Session, value)
+async def set_maintenance(value, actor=None):
+    return await manual_mode(Session, value, actor=actor)
 
 
 @router.message(Command('ack'))
@@ -1447,7 +1488,7 @@ async def ticket_picker(target, *, edit=False):
     async with Session() as s:
         rows = (await s.scalars(select(Setting).where(Setting.key.startswith('support_order:'))
                                 .order_by(Setting.value.desc()).limit(20))).all()
-    buttons = [[(f'Close ticket #{row.key.split(":")[1]}', f'ui:closeticket:{row.key.split(":")[1]}')]
+    buttons = [[(f'Open ticket #{row.key.split(":")[1]}', f'ui:thread:{row.key.split(":")[1]}')]
                for row in rows]
     await show_selection_menu(target, '🎧 Open support tickets' if rows else 'No open tickets.',
                               keyboard(buttons + [[('⬅️ Admin Settings', 'admin:settings')]]), edit=edit)
@@ -1544,7 +1585,8 @@ async def button_action(callback, uid, action):
     target, actor = callback.message, callback.from_user
     parts = action.split(':')
     name = parts[0]
-    public = {'history', 'refunds', 'account', 'support', 'receipt', 'done', 'check', 'order', 'clear'}
+    public = {'history', 'refunds', 'account', 'support', 'receipt', 'done', 'check', 'order', 'clear',
+              'deposits', 'depositreceipt', 'filterorders', 'thread', 'supportwrite', 'opcancel'}
     if name not in public and uid not in settings.admins:
         return await target.answer('Admin only')
     if name == 'ackoutage' and len(parts) == 2:
@@ -1563,12 +1605,14 @@ async def button_action(callback, uid, action):
             return await handlers[command](ButtonRequest(target, actor, f'/{command} {flow["value"]}'))
         return
     await clear_flow(uid)
+    if await operations_button(target, uid, parts):
+        return
     if name == 'cancel':
         return await show_selection_menu(target, 'Cancelled. Admin Settings', admin_settings_keyboard(), edit=True)
     if name == 'maintenance':
         return await maintenance_picker(target, edit=True)
     if name == 'maint' and len(parts) == 2 and parts[1] in ('on', 'off'):
-        await set_maintenance(parts[1])
+        await set_maintenance(parts[1], actor=uid)
         return await maintenance_picker(target, edit=True)
     if name == 'customers':
         return await customer_picker(target, uid, page=int(parts[1]) if len(parts) == 2 else 0, edit=True)
@@ -1638,6 +1682,197 @@ async def button_action(callback, uid, action):
     await target.answer('Invalid selection.')
 
 
+
+async def deposits_card(target, uid):
+    async with Session() as s:
+        rows = (await s.scalars(select(Payment).where(Payment.user_id == uid)
+                                .order_by(Payment.id.desc()).limit(15))).all()
+    buttons = [[(f'#{row.id} · {row.amount_fiat} {settings.wallet_currency} · {row.status}',
+                 f'ui:depositreceipt:{row.id}')] for row in rows]
+    await show_selection_menu(target, '💳 Your deposits — select an invoice for its status or receipt.'
+                              if rows else 'No deposits yet.',
+                              keyboard(buttons + [[('⬅️ Main menu', 'menu:home')]]), edit=True)
+
+
+async def deposit_receipt(target, uid, pid):
+    async with Session() as s:
+        row = await s.get(Payment, pid)
+        if not row or row.user_id != uid:
+            return await target.answer('Deposit not found.')
+    if row.status != 'paid':
+        return await target.answer(f'Deposit #{row.id}: {row.status}. No confirmed receipt yet.')
+    from aiogram.types import BufferedInputFile
+    body = (f'FRIDAY deposit receipt #{row.id}\nAmount credited: {row.amount_credit} '
+            f'{settings.wallet_currency}\nStatus: paid\nGateway: {row.gateway}\n'
+            f'Paid: {row.paid_at:%Y-%m-%d %H:%M} UTC\n' if row.paid_at else
+            f'FRIDAY deposit receipt #{row.id}\nAmount credited: {row.amount_credit} '
+            f'{settings.wallet_currency}\nStatus: paid\nGateway: {row.gateway}\n')
+    await target.answer_document(BufferedInputFile(body.encode(), filename=f'deposit-{pid}.txt'))
+
+
+async def support_thread(target, uid, aid):
+    async with Session() as s:
+        order = await s.get(Activation, aid)
+        if not order or (order.user_id != uid and uid not in settings.admins):
+            return await target.answer('Order not found.')
+        ticket = await s.get(Setting, f'support_order:{aid}')
+        rows = (await s.scalars(select(SupportMessage).where(SupportMessage.order_id == aid)
+                                .order_by(SupportMessage.id.desc()).limit(8))).all()
+    lines = [f'🎧 Support ticket #{aid} · {"Open" if ticket else "Closed"}']
+    lines += [f'{"Support" if row.from_admin else "Customer"}: {row.body[:300]}'
+              for row in reversed(rows)]
+    if not rows:
+        lines.append('No messages yet.')
+    buttons = []
+    if ticket:
+        buttons.append([('✏️ Reply', f'ui:supportwrite:{aid}')])
+        if uid in settings.admins:
+            buttons.append([('Close ticket', f'ui:closeticket:{aid}')])
+    buttons.append([('⬅️ Back', 'ui:tickets' if uid in settings.admins else 'orders')])
+    await show_selection_menu(target, '\n'.join(lines), keyboard(buttons), edit=True)
+
+
+async def operations_button(target, uid, parts):
+    name = parts[0]
+    if name == 'deposits':
+        await deposits_card(target, uid)
+    elif name == 'depositreceipt' and len(parts) == 2:
+        await deposit_receipt(target, uid, int(parts[1]))
+    elif name == 'filterorders' and len(parts) == 2 and parts[1] in ('all', 'active', 'completed', 'refunded'):
+        await show_orders(target, uid, edit=True, state=parts[1])
+    elif name == 'thread' and len(parts) == 2:
+        await support_thread(target, uid, int(parts[1]))
+    elif name == 'supportwrite' and len(parts) == 2:
+        aid = int(parts[1])
+        async with Session() as s:
+            order = await s.get(Activation, aid)
+            ticket = await s.get(Setting, f'support_order:{aid}')
+        if not order or (order.user_id != uid and uid not in settings.admins) or not ticket:
+            await target.answer('Ticket not available.')
+        else:
+            await save_flow(uid, {'type': 'ops_input', 'action': 'support', 'order': aid})
+            await show_selection_menu(target, 'Type your support message (up to 500 characters). Never include OTPs, passwords or full phone numbers.',
+                                      keyboard([[('Cancel', 'ui:opcancel')]]), edit=True)
+    elif name == 'opcancel':
+        await show_selection_menu(target, 'Cancelled.', main_menu_for(uid), edit=True)
+    elif uid not in settings.admins:
+        return False
+    elif name == 'reports':
+        await show_selection_menu(target, '📊 Business reports — select a period.',
+                                  keyboard([[('Today', 'ui:report:1'), ('Last 7 days', 'ui:report:7')],
+                                            [('Last 30 days', 'ui:report:30')],
+                                            [('⬅️ Admin Settings', 'admin:settings')]]), edit=True)
+    elif name == 'report' and len(parts) == 2 and parts[1] in ('1', '7', '30'):
+        end = utcnow()
+        start = end.astimezone(LAGOS).replace(hour=0, minute=0, second=0, microsecond=0)
+        start -= timedelta(days=int(parts[1])-1)
+        await show_selection_menu(target, await report(Session, start, end),
+                                  keyboard([[('⬅️ Reports', 'ui:reports')]]), edit=True)
+    elif name == 'risk':
+        await show_selection_menu(target, await risk_summary(Session),
+                                  keyboard([[('⬅️ Admin Settings', 'admin:settings')]]), edit=True)
+    elif name == 'audit':
+        async with Session() as s:
+            rows = (await s.scalars(select(AdminAudit).order_by(AdminAudit.id.desc()).limit(15))).all()
+        body = '📜 Recent admin activity\n' + ('\n'.join(
+            f'{row.created_at:%m-%d %H:%M} UTC · {row.actor_id} · {row.action} · {row.reference}'
+            for row in rows) or 'No records since this feature was added.')
+        await show_selection_menu(target, body, keyboard([[('⬅️ Admin Settings', 'admin:settings')]]), edit=True)
+    elif name == 'searchcustomer':
+        await save_flow(uid, {'type': 'ops_input', 'action': 'search'})
+        await show_selection_menu(target, 'Enter a Telegram username or numeric customer ID.',
+                                  keyboard([[('Cancel', 'ui:opcancel')]]), edit=True)
+    elif name == 'lowthreshold':
+        async with Session() as s:
+            row = await s.get(Setting, 'provider_low_balance_threshold')
+        threshold = row.value if row else settings.provider_low_balance_alert
+        await save_flow(uid, {'type': 'ops_input', 'action': 'threshold'})
+        await show_selection_menu(target, f'Current low balance alert: {threshold} provider units.\nEnter a new nonnegative threshold (USD for TextVerified).',
+                                  keyboard([[('Cancel', 'ui:opcancel')]]), edit=True)
+    elif name == 'health':
+        async with Session() as s:
+            row = await s.get(Setting, 'textverified_auto_state')
+            state = json.loads(row.value) if row else {}
+            pause = await s.get(Setting, 'purchase_maintenance')
+            gateway = await s.get(Setting, 'ops_gateway_health')
+        stamp = state.get('last_sample')
+        age = max(0, int(utcnow().timestamp()-stamp)) if stamp else None
+        tv = ('stale / unknown' if age is None or age > 120 else
+              'recovering' if state.get('healthy_since') else
+              'outage' if state.get('incident') else 'healthy')
+        await show_selection_menu(target, f'📡 System health\nDatabase: responding\n'
+                                  f'TextVerified: {tv}\nLast sample: {str(age)+"s ago" if age is not None else "none"}\n'
+                                  f'Payment gateway: {gateway.value if gateway else "not sampled"}\n'
+                                  f'Purchase maintenance: {pause.value if pause else "off"}\n'
+                                  f'Process uptime: {int((time.monotonic()-STARTED_AT)//60)} min\n'
+                                  'Monitoring is available while the host is running.',
+                                  keyboard([[('Refresh', 'ui:health'), ('⬅️ Admin Settings', 'admin:settings')]]), edit=True)
+    else:
+        return False
+    return True
+
+
+async def operations_input(message, uid, flow, raw):
+    action = flow.get('action')
+    if action == 'support':
+        if not await private_customer(message):
+            return
+        if len(raw) > 500:
+            return await message.answer('Please use at most 500 characters.')
+        aid = int(flow['order'])
+        async with Session.begin() as s:
+            order = await s.get(Activation, aid, with_for_update=True)
+            ticket = await s.get(Setting, f'support_order:{aid}')
+            if not order or not ticket or (order.user_id != uid and uid not in settings.admins):
+                return await message.answer('Ticket not available.')
+            # Administrators can reply to other customers; their own orders remain customer messages.
+            from_admin = uid in settings.admins and order.user_id != uid
+            row = SupportMessage(order_id=aid, actor_id=uid, from_admin=from_admin, body=raw)
+            s.add(row)
+            await s.flush()
+            recipients = [order.user_id] if from_admin else settings.admins
+            for recipient in recipients:
+                await notice(s, f'support:{row.id}:{recipient}', recipient,
+                             f'New support message on order #{aid}. Open the ticket in Friday to read it.')
+            if from_admin:
+                audit(s, uid, 'support_reply', aid)
+        await clear_flow(uid)
+        return await message.answer('Message saved. The recipient will be notified.',
+                                    reply_markup=keyboard([[('View ticket', f'ui:thread:{aid}')]]))
+    if uid not in settings.admins:
+        await clear_flow(uid)
+        return
+    if action == 'search':
+        query = raw.lstrip('@')
+        async with Session() as s:
+            if query.isascii() and query.isdigit() and len(query) <= 16:
+                rows = (await s.scalars(select(User).where(User.id == int(query)))).all()
+            else:
+                if not query or len(query) > 32 or not all(ch.isascii() and (ch.isalnum() or ch == '_') for ch in query):
+                    return await message.answer('Enter a valid Telegram username or numeric ID.')
+                rows = (await s.scalars(select(User).where(func.lower(User.username) == query.lower()).limit(15))).all()
+        await clear_flow(uid)
+        return await show_selection_menu(message, 'Customer results:' if rows else 'No matching customer.',
+            keyboard([[(f'{row.username or "Customer"} · {row.id}', f'ui:customer:{row.id}')] for row in rows]
+                     + [[('Search again', 'ui:searchcustomer'), ('⬅️ Admin Settings', 'admin:settings')]]))
+    if action == 'threshold':
+        try:
+            amount = Decimal(raw)
+            if not amount.is_finite() or not 0 <= amount <= 1000000 or len(raw) > 16:
+                raise ValueError()
+        except (ValueError, InvalidOperation):
+            return await message.answer('Enter a valid nonnegative threshold.')
+        async with Session.begin() as s:
+            row = await s.get(Setting, 'provider_low_balance_threshold', with_for_update=True)
+            if row:
+                row.value = str(amount)
+            else:
+                s.add(Setting(key='provider_low_balance_threshold', value=str(amount)))
+            audit(s, uid, 'low_balance_threshold', str(amount))
+        await clear_flow(uid)
+        await message.answer(f'Low balance threshold saved: {amount}.')
+
+
 @router.message(F.text)
 async def handle_pending_text(message: Message):
     # Only input explicitly requested by this bot is interpreted as an amount.
@@ -1659,6 +1894,8 @@ async def handle_pending_text(message: Message):
     flow = await read_flow(uid)
     if not flow:
         return
+    if flow.get('type') == 'ops_input':
+        return await operations_input(message, uid, flow, raw)
     if flow.get('type') == 'button_input':
         if uid not in settings.admins:
             await clear_flow(uid)

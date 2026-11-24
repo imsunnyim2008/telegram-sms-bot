@@ -105,6 +105,48 @@ class MaintenanceNotice(Base):
     next_attempt_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utcnow)
 
 
+class PaymentInbox(Base):
+    """Minimal durable reference from a verified finished NOWPayments IPN."""
+    __tablename__ = 'payment_inbox'
+    payment_id: Mapped[str] = mapped_column(String(40), primary_key=True)
+    invoice_id: Mapped[str | None] = mapped_column(String(40))
+    order_id: Mapped[str | None] = mapped_column(String(55))
+    status: Mapped[str] = mapped_column(String(16), default='pending', index=True)
+    attempts: Mapped[int] = mapped_column(Integer, default=0)
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utcnow)
+    next_attempt_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utcnow)
+
+
+class AdminAudit(Base):
+    __tablename__ = 'admin_audit'
+    id: Mapped[int] = mapped_column(Integer, primary_key=True)
+    actor_id: Mapped[int] = mapped_column(BigInteger, index=True)
+    action: Mapped[str] = mapped_column(String(40))
+    reference: Mapped[str] = mapped_column(String(100), default='')
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utcnow)
+
+
+class SupportMessage(Base):
+    __tablename__ = 'support_messages'
+    id: Mapped[int] = mapped_column(Integer, primary_key=True)
+    order_id: Mapped[int] = mapped_column(ForeignKey('activations.id'), index=True)
+    actor_id: Mapped[int] = mapped_column(BigInteger)
+    from_admin: Mapped[bool] = mapped_column(Boolean, default=False)
+    body: Mapped[str] = mapped_column(Text)
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utcnow)
+
+
+class OpsNotice(Base):
+    __tablename__ = 'ops_notices'
+    key: Mapped[str] = mapped_column(String(100), primary_key=True)
+    recipient: Mapped[int] = mapped_column(BigInteger)
+    body: Mapped[str] = mapped_column(Text)
+    status: Mapped[str] = mapped_column(String(12), default='pending', index=True)
+    attempts: Mapped[int] = mapped_column(Integer, default=0)
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utcnow)
+    next_attempt_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utcnow)
+
+
 class Setting(Base):
     __tablename__ = 'settings'
     key: Mapped[str] = mapped_column(String(80), primary_key=True)

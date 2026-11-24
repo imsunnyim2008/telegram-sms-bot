@@ -199,8 +199,7 @@ class Shop:
                 raise BotError('Provider did not confirm cancellation; balance unchanged')
         except ProviderError as exc:
             raise BotError('Provider cancellation was not confirmed; balance unchanged') from exc
-        if await self.refund(activation_id, 'cancelled'):
-            await self.notifier.send(user_id, f'Order #{activation_id} cancelled. Refunded in full.')
+        await self.refund(activation_id, 'cancelled')
 
     async def reconcile(self, activation_id: int) -> None:
         """Try to recover ambiguous 5SIM orders; NEVER buy a replacement blindly."""
