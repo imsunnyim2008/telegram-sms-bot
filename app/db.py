@@ -169,6 +169,13 @@ class BankEventMatch(Base):
     sender_key: Mapped[str | None] = mapped_column(String(64), index=True)
 
 
+class BankEventTime(Base):
+    """Provider transaction time, distinct from webhook delivery time."""
+    __tablename__ = 'bank_event_times'
+    event_key: Mapped[str] = mapped_column(ForeignKey('moniepoint_events.event_key'), primary_key=True)
+    occurred_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), index=True)
+
+
 class BankEventAlias(Base):
     """Optional bank identifiers from signed events; never persist raw narration or names."""
     __tablename__ = 'bank_event_aliases'
