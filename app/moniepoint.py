@@ -12,7 +12,7 @@ from sqlalchemy.dialects.postgresql import insert as pg_insert
 from sqlalchemy.dialects.sqlite import insert as sqlite_insert
 
 from .config import settings
-from .db import BankEventMatch, MoniepointEvent, utcnow
+from .db import BankDeposit, BankEventAlias, BankEventMatch, MoniepointEvent, utcnow
 from .operations import notice
 
 TRANSFER_EVENTS = {'V1_TRANSFER_TRANSACTION', 'V1_POS_TRANSFER_TRANSACTION'}
@@ -36,6 +36,26 @@ def valid_signature(body, webhook_id, timestamp, signature, secret):
 def identity_key(value):
     normalized = ' '.join(value.casefold().split())
     return hmac.new(webhook_secret().encode(), normalized.encode(), hashlib.sha256).hexdigest()
+
+
+REMARK_PATTERN = re.compile(r'(?<![A-Z0-9])FRIDAY[A-F0-9]{24}(?![A-Z0-9])', re.IGNORECASE)
+
+
+def event_aliases(data, meta):
+    if not webhook_secret():
+        return []
+    aliases = set()
+    for obj in (data, meta):
+        for field, kind in (('transactionNumber', 'id'), ('transactionNo', 'id'),
+                            ('sessionId', 'session'), ('sessionID', 'session')):
+            value = obj.get(field)
+            if isinstance(value, str) and re.fullmatch(r'[0-9A-Za-z|_-]{6,150}', value):
+                aliases.add((kind, identity_key(value)))
+        value = obj.get('narration')
+        if isinstance(value, str):
+            for code in REMARK_PATTERN.findall(value[:1000]):
+                aliases.add(('remark', identity_key(code)))
+    return sorted(aliases)
 
 
 def parse_transfer(body):
@@ -71,6 +91,7 @@ def parse_transfer(body):
     sender = meta.get('customerName')
     rrn = data.get('retrievalReferenceNumber')
     return {
+        'aliases': event_aliases(data, meta),
         'sender_key': identity_key(sender) if isinstance(sender, str) and sender.strip() and webhook_secret() else None,
         'rrn_key': identity_key(rrn) if isinstance(rrn, str) and rrn.strip() and webhook_secret() else None,
         'event_type': kind, 'transaction_key': hashlib.sha256(ref.encode()).hexdigest(),
@@ -85,6 +106,7 @@ async def record_transfer(session, webhook_id, data):
     # may contain bank account numbers or names and must not be stored.
     key = hashlib.sha256(webhook_id.encode()).hexdigest()
     data = dict(data)
+    aliases = data.pop('aliases', [])
     match = {k: data.pop(k, None) for k in ('sender_key', 'rrn_key')}
     async with session.begin() as s:
         factory = pg_insert if s.bind.dialect.name == 'postgresql' else sqlite_insert
@@ -94,7 +116,22 @@ async def record_transfer(session, webhook_id, data):
         if result.scalar_one_or_none() is None:
             return False
         await s.execute(factory(BankEventMatch).values(event_key=key, **match).on_conflict_do_nothing(index_elements=['event_key']))
+        for kind, digest in aliases:
+            await s.execute(factory(BankEventAlias).values(event_key=key, kind=kind, digest=digest)
+                            .on_conflict_do_nothing())
         amount = Decimal(data['amount_kobo']) / 100
+        # Detect the generated narration without a customer submitting a receipt.
+        # This is matching only: a signed POS event does not establish settlement.
+        remark_keys = [digest for kind, digest in aliases if kind == 'remark']
+        if (remark_keys and data['event_type'] in TRANSFER_EVENTS
+                and data['transaction_status'] == 'COMPLETED' and data['response_code'] == '20000'):
+            claims = (await s.scalars(select(BankDeposit).where(
+                BankDeposit.method == 'remark', BankDeposit.match_key.in_(remark_keys),
+                BankDeposit.amount_kobo == data['amount_kobo'], BankDeposit.status == 'pending'))).all()
+            if len(claims) == 1:
+                claim = claims[0]
+                await notice(s, f'mp-remark:{claim.id}', claim.user_id,
+                             f'Bank deposit #{claim.id}: Friday found a matching signed bank event. Settlement confirmation is pending.')
         body = (f'🏦 Moniepoint pilot event received\nType: {data["event_type"]}\n'
                 f'Amount: NGN {amount:.2f}\nStatus: {data["transaction_status"]}\n'
                 f'Response: {data["response_code"] or "none"}\n'
