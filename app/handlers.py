@@ -12,13 +12,13 @@ from aiogram import F, Router
 from aiogram.exceptions import TelegramBadRequest
 from aiogram.filters import Command, CommandStart
 from aiogram.types import CallbackQuery, InlineKeyboardButton, InlineKeyboardMarkup, Message
-from sqlalchemy import func, select
+from sqlalchemy import func, insert, literal, select
 
 from .business import BotError
 from .config import settings
 from .country_ui import arrange_country_offers, country_flag
 from .command_menu import PUBLIC_HELP, ADMIN_HELP
-from .db import Activation, LedgerEntry, Session, Setting, User, utcnow
+from .db import Activation, LedgerEntry, MaintenanceNotice, Session, Setting, User, utcnow
 from .ledger import InsufficientFunds, apply
 from .service_ui import (app_label_html, custom_emoji_unavailable,
                          without_custom_emoji)
@@ -1318,10 +1318,20 @@ async def set_maintenance(value):
         raise ValueError('Invalid maintenance mode')
     async with Session.begin() as s:
         row = await s.get(Setting, 'purchase_maintenance', with_for_update=True)
+        previous = row.value if row else 'off'
+        if previous == value:
+            return False
         if row:
             row.value = value
         else:
             s.add(Setting(key='purchase_maintenance', value=value))
+        now = utcnow()
+        await s.execute(insert(MaintenanceNotice).from_select(
+            ['user_id', 'state', 'status', 'attempts', 'created_at', 'next_attempt_at'],
+            select(User.id, literal(value), literal('pending'), literal(0),
+                   literal(now), literal(now)).where(
+                User.accepted_terms.is_(True), User.is_banned.is_(False))))
+    return True
 
 
 async def maintenance_picker(target, *, edit=False):
@@ -1330,7 +1340,7 @@ async def maintenance_picker(target, *, edit=False):
     state = row.value if row else 'off'
     await show_selection_menu(
         target, f'🛠 Purchase maintenance: {state.upper()}\n'
-        'Existing orders and refunds remain available.',
+        'Existing orders and refunds remain available. Customers are notified when the mode changes.',
         keyboard([[('🔴 Maintenance ON', 'ui:maint:on'), ('🟢 Maintenance OFF', 'ui:maint:off')],
                   [('⬅️ Admin Settings', 'admin:settings')]]), edit=edit)
 
