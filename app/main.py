@@ -8,7 +8,7 @@ from contextlib import asynccontextmanager
 
 from aiogram import Bot, Dispatcher
 from aiogram.exceptions import TelegramBadRequest
-from aiogram.types import Update
+from aiogram.types import InlineKeyboardButton, InlineKeyboardMarkup, Update
 from fastapi import BackgroundTasks, FastAPI, HTTPException, Request
 
 from .business import Shop
@@ -51,6 +51,12 @@ class TelegramNotifier:
             # owner lacks Premium). Retain the app name, never send false logos.
             await self.bot.send_message(user_id, without_custom_emoji(message),
                                         parse_mode=None)
+
+
+    async def send_api_alert(self, user_id, message, incident):
+        await self.bot.send_message(user_id, message, reply_markup=InlineKeyboardMarkup(
+            inline_keyboard=[[InlineKeyboardButton(text='✅ Acknowledge alert',
+                                                   callback_data=f'ui:ackoutage:{incident}')]]))
 
 
 runtime = {}
@@ -104,7 +110,7 @@ async def lifespan(app: FastAPI):
         max_connections=4,
     )
     await register_native_menu(bot, settings.admins)
-    tasks = [asyncio.create_task(worker.run())]
+    tasks = [asyncio.create_task(worker.run()), asyncio.create_task(worker.run_health_monitor())]
     log.info('Telegram signed webhook and SMS polling worker started')
     try:
         yield
