@@ -19,7 +19,7 @@ from .config import settings
 from .country_ui import arrange_country_offers, country_flag
 from .command_menu import PUBLIC_HELP, ADMIN_HELP
 from .db import Activation, AdminAudit, LedgerEntry, Payment, Session, Setting, SupportMessage, User, utcnow
-from .operations import LAGOS, audit, notice, report, risk_summary
+from .operations import LAGOS, audit, claim_purchase, notice, report, risk_summary
 from .auto_maintenance import acknowledge, manual_mode
 from .ledger import InsufficientFunds, apply
 from .service_ui import (app_label_html, custom_emoji_unavailable,
@@ -300,6 +300,13 @@ async def callbacks(callback: CallbackQuery):
             await remove_previous_menu(callback.message)
         elif data.startswith('buy:'):
             _, service, country = data.split(':')
+            message_id = getattr(callback.message, 'message_id', None)
+            if isinstance(message_id, int) and message_id > 0:
+                date = getattr(callback.message, 'date', None)
+                if date and (utcnow() - date).total_seconds() > 86400:
+                    return await callback.message.answer('Purchase confirmation expired. Open Buy number again.')
+                if not await claim_purchase(Session, uid, message_id):
+                    return await callback.message.answer('This confirmation was already processed. Check My orders.')
             order = await shop.buy(uid, service, country)
             await send_branded_message(
                 callback.message,
@@ -352,7 +359,7 @@ async def callbacks(callback: CallbackQuery):
                                              edit=True)
                 elif parts[1] == 'reset' and len(parts) == 4:
                     await admin_price_reset(callback.message, parts[2], parts[3],
-                                            edit=True)
+                                            edit=True, actor=uid)
                 else:
                     await callback.message.answer('Invalid selection. Use /setprice.')
         elif data == 'clear:confirm':
@@ -579,13 +586,15 @@ async def admin_price_prompt(target, uid: int, service: str, country: str,
     )
 
 
-async def admin_price_reset(target, service: str, country: str, *, edit: bool = False):
+async def admin_price_reset(target, service: str, country: str, *, edit: bool = False, actor=None):
     if not settings.service_allowed(service) or not settings.country_allowed(country):
         raise BotError('Invalid price selection')
     async with Session.begin() as s:
         row = await s.get(Setting, f'price:{service}:{country}')
         if row:
             await s.delete(row)
+        if actor is not None:
+            audit(s, actor, 'price_reset', f'{service}:{country}')
     await show_selection_menu(
         target, '✅ Custom public price reset. Global markup will apply to new purchases.',
         keyboard([[('💵 Change another price', 'ps:services:0')],
@@ -620,6 +629,7 @@ async def admin_price_save(target, uid: int, flow: dict, raw: str):
             row.value = str(value)
         else:
             s.add(Setting(key=key, value=str(value)))
+        audit(s, uid, 'price_set', f'{service}:{country}:{value}')
     await clear_flow(uid)
     await show_selection_menu(
         target,
@@ -973,6 +983,8 @@ async def admin_reconcile_nowpayment(message: Message):
         invoice_id = str(invoice_id) if invoice_id is not None else None
         credited = await shop.verify_and_credit_nowpayments(
             invoice_id, payment_id, order_id=order_id)
+        async with Session.begin() as s:
+            audit(s, message.from_user.id, 'reconcile_payment', f'{payment_id}:{credited}')
         await message.answer(
             'Payment confirmed and wallet credited once.' if credited
             else 'Payment already credited or payment details failed strict matching. Check /testall.')
@@ -1090,6 +1102,8 @@ async def admin_broadcast(message: Message):
         except Exception:
             failed += 1
         await asyncio.sleep(.045)
+    async with Session.begin() as s:
+        audit(s, message.from_user.id, 'broadcast', f'delivered={delivered};failed={failed}')
     await message.answer(f'Broadcast finished: delivered {delivered}, failed {failed}')
 
 
@@ -1110,6 +1124,8 @@ async def admin_resolve(message: Message):
             if not row or row.status != 'manual_review':
                 return await message.answer('Order is not under manual review')
         if await shop.refund(aid, 'failed'):
+            async with Session.begin() as s:
+                audit(s, message.from_user.id, 'manual_refund', aid)
             await message.answer(f'Order #{aid} refunded; confirm external provider allocation separately.')
             await shop.alert_admins(f'Manual order #{aid} refund authorized by admin {message.from_user.id}.')
         else:
