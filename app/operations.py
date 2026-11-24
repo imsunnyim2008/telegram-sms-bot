@@ -23,6 +23,16 @@ async def insert_once(s, model, key, values):
     await s.execute(stmt)
 
 
+async def claim_purchase(session, uid, message_id):
+    """One purchase attempt per Telegram confirmation card, even after restart."""
+    async with session.begin() as s:
+        factory = pg_insert if s.bind.dialect.name == 'postgresql' else sqlite_insert
+        stmt = factory(Setting).values(key=f'purchase_claim:{uid}:{message_id}',
+                                       value=utcnow().isoformat())
+        result = await s.execute(stmt.on_conflict_do_nothing(index_elements=['key']).returning(Setting.key))
+        return result.scalar_one_or_none() is not None
+
+
 async def notice(s, key, recipient, body):
     await insert_once(s, OpsNotice, 'key', dict(key=key, recipient=recipient,
                      body=body, status='pending', attempts=0,
