@@ -1,0 +1,186 @@
+"""Direct transfer workflow. A POS event alone cannot establish an incoming settled bank credit."""
+import hashlib
+import json
+import re
+from datetime import timedelta
+from decimal import Decimal, InvalidOperation, ROUND_DOWN
+
+from sqlalchemy import or_, select
+from sqlalchemy.exc import IntegrityError
+
+from .config import settings
+from .db import BankDeposit, BankEventMatch, MoniepointEvent, Payment, Setting, User, utcnow
+from .ledger import apply
+from .moniepoint import identity_key, webhook_secret
+from .operations import audit, notice
+
+KEY = 'bank_deposit_config'
+ELIGIBLE = ('V1_TRANSFER_TRANSACTION', 'V1_POS_TRANSFER_TRANSACTION', 'V1_POS_COLLECTION_TRANSACTION')
+
+
+async def config(session):
+    async with session() as s:
+        row = await s.get(Setting, KEY)
+        return json.loads(row.value) if row else {}
+
+
+def ready(cfg):
+    return bool(cfg.get('enabled') and cfg.get('name') and cfg.get('account')
+                and cfg.get('rate') and webhook_secret() and settings.wallet_currency == 'USD')
+
+
+def amount_kobo(raw):
+    try:
+        amount = Decimal(raw)
+        if not amount.is_finite() or amount <= 0 or amount > Decimal('100000000') or amount.as_tuple().exponent < -2:
+            raise ValueError()
+        return int(amount * 100)
+    except (InvalidOperation, ValueError):
+        raise ValueError('Enter a positive naira amount, at most two decimal places.')
+
+
+async def update_config(session, actor, field, value):
+    if actor not in settings.admins:
+        raise ValueError('Admin only')
+    async with session.begin() as s:
+        row = await s.get(Setting, KEY, with_for_update=True)
+        cfg = json.loads(row.value) if row else {}
+        if field == 'account':
+            if not re.fullmatch(r'[0-9]{10}', value):
+                raise ValueError('Enter a 10-digit account number.')
+        elif field == 'name':
+            if not 2 <= len(value) <= 100 or not all(c.isalpha() or c in " .'-&" for c in value):
+                raise ValueError('Enter the account name as displayed by the bank.')
+        elif field == 'rate':
+            try:
+                rate = Decimal(value)
+                if not rate.is_finite() or not 0 < rate <= 1000000 or rate.as_tuple().exponent < -4:
+                    raise ValueError()
+                value = str(rate)
+            except (InvalidOperation, ValueError):
+                raise ValueError('Enter a positive NGN per USD rate.')
+        elif field == 'enabled':
+            if value and not ready({**cfg, 'enabled': True}):
+                raise ValueError('Set bank details, exchange rate and signing secret first.')
+        else:
+            raise ValueError('Invalid setting')
+        cfg[field] = value
+        if field in ('account', 'name'):
+            cfg['enabled'] = False
+        if row:
+            row.value = json.dumps(cfg)
+        else:
+            s.add(Setting(key=KEY, value=json.dumps(cfg)))
+        audit(s, actor, 'bank_config', field)
+
+
+async def create_claim(session, uid, kobo, rate, method, raw):
+    if method not in ('id', 'name') or not webhook_secret():
+        raise ValueError('Bank verification is unavailable.')
+    if not 2 <= len(raw) <= 200 or any(ord(c) < 32 for c in raw):
+        raise ValueError('Enter a valid transaction ID or sender name.')
+    if method == 'name' and not all(c.isalpha() or c in " .'-" for c in raw):
+        raise ValueError('Enter the full sender name as shown on the transfer.')
+    cfg = await config(session)
+    if not ready(cfg):
+        raise ValueError('Bank deposits are currently disabled.')
+    rate = Decimal(rate)
+    if rate <= 0:
+        raise ValueError('Invalid exchange rate.')
+    credit = (Decimal(kobo) / 100 / rate).quantize(Decimal('.0001'), rounding=ROUND_DOWN)
+    # Wallet precision is four decimals; amounts below it are recorded for review.
+    match_key = hashlib.sha256(raw.strip().encode()).hexdigest() if method == 'id' else identity_key(raw)
+    async with session.begin() as s:
+        user = await s.get(User, uid, with_for_update=True)
+        if not user or user.is_banned or not user.accepted_terms:
+            raise ValueError('Account unavailable.')
+        pending = (await s.scalars(select(BankDeposit.id).where(
+            BankDeposit.user_id == uid, BankDeposit.status == 'pending').limit(5))).all()
+        if len(pending) >= 5:
+            raise ValueError('You have five pending claims. Contact support before creating another.')
+        row = BankDeposit(user_id=uid, amount_kobo=kobo, rate=rate, credit=credit,
+                          method=method, match_key=match_key, status='pending')
+        s.add(row)
+        await s.flush()
+        for admin in settings.admins:
+            await notice(s, f'bankclaim:{row.id}:{admin}', admin,
+                         f'🏦 Bank deposit claim #{row.id}: customer {uid}, NGN {Decimal(kobo)/100:.2f}. Review via Admin → Bank transfers.')
+        return row.id
+
+
+async def candidates(session, claim_id):
+    async with session() as s:
+        claim = await s.get(BankDeposit, claim_id)
+        if not claim:
+            return []
+        # A claimed transaction ID is compared to the authenticated transaction reference.
+        # A full name is only a secondary lookup; it never proves ownership.
+        query = select(MoniepointEvent).outerjoin(BankEventMatch).where(
+            MoniepointEvent.event_type.in_(ELIGIBLE),
+            MoniepointEvent.amount_kobo == claim.amount_kobo,
+            MoniepointEvent.transaction_status == 'COMPLETED',
+            MoniepointEvent.response_code == '20000',
+            MoniepointEvent.received_at >= claim.created_at - timedelta(days=1),
+            ~MoniepointEvent.transaction_key.in_(select(BankDeposit.verified_transaction)
+                .where(BankDeposit.verified_transaction.is_not(None))))
+        if claim.method == 'id':
+            query = query.where(MoniepointEvent.transaction_key == claim.match_key)
+        else:
+            query = query.where(BankEventMatch.sender_key == claim.match_key)
+        rows = (await s.scalars(query.order_by(MoniepointEvent.received_at.desc()).limit(20))).all()
+        unique = {}
+        for row in rows:
+            unique.setdefault(row.transaction_key, row)
+        return list(unique.values())
+
+
+async def approve(session, actor, claim_id, event_key):
+    if actor not in settings.admins:
+        raise ValueError('Admin only')
+    matched = await candidates(session, claim_id)
+    if len(matched) != 1 or matched[0].event_key != event_key:
+        raise ValueError('No unique authenticated match. Do not credit this claim.')
+    try:
+        async with session.begin() as s:
+            claim = await s.get(BankDeposit, claim_id, with_for_update=True)
+            if not claim or claim.status != 'pending':
+                raise ValueError('Claim already resolved.')
+            event = await s.get(MoniepointEvent, event_key)
+            if not event or event.event_type not in ELIGIBLE or event.amount_kobo != claim.amount_kobo:
+                raise ValueError('Event mismatch.')
+            user = await s.get(User, claim.user_id, with_for_update=True)
+            if not user or user.is_banned or not user.accepted_terms:
+                raise ValueError('Customer unavailable.')
+            if claim.credit <= 0:
+                raise ValueError('Below wallet precision. Resolve manually without losing the naira deposit.')
+            # Unique transaction key is global across customers and claim methods.
+            claim.verified_transaction = event.transaction_key
+            claim.status = 'paid'
+            claim.resolved_at = utcnow()
+            payment = Payment(user_id=claim.user_id, gateway='moniepoint',
+                              gateway_invoice_id=event.transaction_key,
+                              amount_fiat=claim.credit, amount_credit=claim.credit,
+                              status='paid', paid_at=utcnow())
+            s.add(payment)
+            await s.flush()
+            claim.payment_id = payment.id
+            await apply(s, claim.user_id, claim.credit, 'topup', 'payment', str(payment.id))
+            audit(s, actor, 'bank_approve', claim.id)
+            await notice(s, f'bankpaid:{claim.id}', claim.user_id,
+                         f'✅ Bank deposit #{claim.id} confirmed. +{claim.credit} USD wallet credit.')
+    except IntegrityError as exc:
+        raise ValueError('This transaction was already claimed or credited.') from exc
+
+
+async def reject(session, actor, claim_id):
+    if actor not in settings.admins:
+        raise ValueError('Admin only')
+    async with session.begin() as s:
+        row = await s.get(BankDeposit, claim_id, with_for_update=True)
+        if not row or row.status != 'pending':
+            raise ValueError('Claim already resolved.')
+        row.status = 'rejected'
+        row.resolved_at = utcnow()
+        audit(s, actor, 'bank_reject', claim_id)
+        await notice(s, f'bankreject:{claim_id}', row.user_id,
+                     f'Bank claim #{claim_id} could not be verified. Contact support if your transfer settled.')
