@@ -111,7 +111,8 @@ async def lifespan(app: FastAPI):
         max_connections=4,
     )
     await register_native_menu(bot, settings.admins)
-    tasks = [asyncio.create_task(worker.run()), asyncio.create_task(worker.run_health_monitor())]
+    tasks = [asyncio.create_task(worker.run()), asyncio.create_task(worker.run_health_monitor()),
+             asyncio.create_task(worker.run_operations())]
     log.info('Telegram signed webhook and SMS polling worker started')
     try:
         yield
