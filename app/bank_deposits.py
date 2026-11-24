@@ -10,7 +10,7 @@ from sqlalchemy import or_, select
 from sqlalchemy.exc import IntegrityError
 
 from .config import settings
-from .db import BankDeposit, BankEventAlias, BankEventMatch, MoniepointEvent, Payment, Setting, User, utcnow
+from .db import BankDeposit, BankEventAlias, BankEventMatch, BankEventTime, MoniepointEvent, Payment, Setting, User, utcnow
 from .ledger import apply
 from .moniepoint import identity_key, webhook_secret
 from .operations import audit, notice
@@ -128,6 +128,29 @@ async def create_claim(session, uid, kobo, rate, method, raw, *, existing_quote=
         return row.id
 
 
+async def submit_sender_name(session, uid, claim_id, raw):
+    name = ' '.join(raw.split())
+    if not 3 <= len(name) <= 200 or len(name.split()) < 2 or not all(c.isalpha() or c in " .'-" for c in name):
+        raise ValueError('Enter the full name shown on your sending bank account.')
+    if not webhook_secret():
+        raise ValueError('Bank verification is temporarily unavailable.')
+    digest = identity_key(name)
+    async with session.begin() as s:
+        claim = await s.get(BankDeposit, claim_id, with_for_update=True)
+        if not claim or claim.user_id != uid or claim.status != 'pending':
+            raise ValueError('This deposit request is no longer pending.')
+        if claim.method == 'remark':
+            claim.alternate_key = claim.match_key
+            claim.match_key = digest
+            claim.method = 'name'
+        elif claim.method != 'name' or not claim.alternate_key or claim.match_key != digest:
+            raise ValueError('This deposit already has a verification request. Contact support to correct it.')
+        for admin in settings.admins:
+            await notice(s, f'bankclaim:{claim.id}:{admin}', admin,
+                         f'Bank deposit #{claim.id}: customer {uid}, NGN {Decimal(claim.amount_kobo)/100:.2f}. Sender name submitted; review signed bank events.')
+        return claim.id
+
+
 async def candidates(session, claim_id):
     async with session() as s:
         claim = await s.get(BankDeposit, claim_id)
@@ -157,6 +180,12 @@ async def candidates(session, claim_id):
                                     MoniepointEvent.received_at <= claim.created_at + timedelta(days=1))
         else:
             query = query.where(BankEventMatch.sender_key == claim.match_key)
+            if claim.alternate_key:
+                # For new name-only requests, compare actual bank transaction time
+                # against the original quote, not time of name submission or delivery.
+                query = query.join(BankEventTime, BankEventTime.event_key == MoniepointEvent.event_key).where(
+                    BankEventTime.occurred_at >= claim.created_at - timedelta(seconds=30),
+                    BankEventTime.occurred_at <= claim.created_at + timedelta(days=1))
         rows = (await s.scalars(query.order_by(MoniepointEvent.received_at.desc()).limit(20))).all()
         unique = {}
         for row in rows:
