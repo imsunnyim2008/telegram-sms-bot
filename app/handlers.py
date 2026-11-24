@@ -12,13 +12,14 @@ from aiogram import F, Router
 from aiogram.exceptions import TelegramBadRequest
 from aiogram.filters import Command, CommandStart
 from aiogram.types import CallbackQuery, InlineKeyboardButton, InlineKeyboardMarkup, Message
-from sqlalchemy import func, insert, literal, select
+from sqlalchemy import func, select
 
 from .business import BotError
 from .config import settings
 from .country_ui import arrange_country_offers, country_flag
 from .command_menu import PUBLIC_HELP, ADMIN_HELP
-from .db import Activation, LedgerEntry, MaintenanceNotice, Session, Setting, User, utcnow
+from .db import Activation, LedgerEntry, Session, Setting, User, utcnow
+from .auto_maintenance import acknowledge, manual_mode
 from .ledger import InsufficientFunds, apply
 from .service_ui import (app_label_html, custom_emoji_unavailable,
                          without_custom_emoji)
@@ -1314,24 +1315,17 @@ async def admin_maintenance(message: Message):
 
 
 async def set_maintenance(value):
-    if value not in ('on', 'off'):
-        raise ValueError('Invalid maintenance mode')
-    async with Session.begin() as s:
-        row = await s.get(Setting, 'purchase_maintenance', with_for_update=True)
-        previous = row.value if row else 'off'
-        if previous == value:
-            return False
-        if row:
-            row.value = value
-        else:
-            s.add(Setting(key='purchase_maintenance', value=value))
-        now = utcnow()
-        await s.execute(insert(MaintenanceNotice).from_select(
-            ['user_id', 'state', 'status', 'attempts', 'created_at', 'next_attempt_at'],
-            select(User.id, literal(value), literal('pending'), literal(0),
-                   literal(now), literal(now)).where(
-                User.accepted_terms.is_(True), User.is_banned.is_(False))))
-    return True
+    return await manual_mode(Session, value)
+
+
+@router.message(Command('ack'))
+async def admin_ack(message: Message):
+    if not await private_admin(message):
+        return
+    if await acknowledge(Session):
+        await message.answer('✅ Outage acknowledged. Automatic pause is cancelled for this incident. Monitoring continues.')
+    else:
+        await message.answer('No current TextVerified outage to acknowledge.')
 
 
 async def maintenance_picker(target, *, edit=False):
@@ -1553,6 +1547,10 @@ async def button_action(callback, uid, action):
     public = {'history', 'refunds', 'account', 'support', 'receipt', 'done', 'check', 'order', 'clear'}
     if name not in public and uid not in settings.admins:
         return await target.answer('Admin only')
+    if name == 'ackoutage' and len(parts) == 2:
+        if await acknowledge(Session, parts[1]):
+            return await target.answer('✅ Outage acknowledged. Monitoring continues. Any existing maintenance remains unchanged.')
+        return await target.answer('This outage alert is no longer current.')
     if name == 'confirm' and len(parts) == 2:
         flow = await consume_confirmation(uid, parts[1])
         if not flow:
@@ -1650,6 +1648,14 @@ async def handle_pending_text(message: Message):
     if not raw or raw.startswith('/'):
         return
     uid = message.from_user.id
+    reply = getattr(message, 'reply_to_message', None)
+    if uid in settings.admins and reply and getattr(reply, 'from_user', None):
+        original = reply.text or ''
+        bot = getattr(message, 'bot', None)
+        if bot and reply.from_user.id == bot.id and original.startswith('🚨 FRIDAY: TextVerified outage'):
+            marker = next((line[10:] for line in original.splitlines() if line.startswith('Incident: ')), '')
+            if marker and await acknowledge(Session, marker):
+                return await message.answer('✅ Outage acknowledged. Monitoring continues.')
     flow = await read_flow(uid)
     if not flow:
         return
