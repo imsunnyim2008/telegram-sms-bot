@@ -256,3 +256,26 @@ async def test_topup_always_shows_both_choices_and_admin_bank_setup(setup_databa
     await handlers.bank_button(message, 7031009238, ['bankstart'])
     assert 'Set account name' in str(message.edits[-1][1]['reply_markup'])
     assert not gateway.invoices
+
+
+@pytest.mark.asyncio
+async def test_bank_config_continues_without_restarting(setup_database, monkeypatch):
+    session, _, gateway = setup_database
+    monkeypatch.setenv('MONIEPOINT_WEBHOOK_SECRET', 'test-secret')
+    uid = 7031009238
+    message = Target(uid=uid)
+    await handlers.save_flow(uid, {'type':'bank_input','action':'config','field':'name'})
+    message.text = 'Example Merchant'
+    await handlers.handle_pending_text(message)
+    assert '10-digit Moniepoint account number' in message.answers[-1][0]
+    assert (await handlers.read_flow(uid))['field'] == 'account'
+    message.text = '0123456789'
+    await handlers.handle_pending_text(message)
+    assert 'exchange rate' in message.answers[-1][0]
+    assert (await handlers.read_flow(uid))['field'] == 'rate'
+    message.text = '1500'
+    await handlers.handle_pending_text(message)
+    assert 'Bank details saved' in message.answers[-1][0]
+    assert await handlers.read_flow(uid) is None
+    assert 'ui:banktoggle:on' in str(message.answers[-1][1]['reply_markup'])
+    assert not gateway.invoices
