@@ -61,6 +61,10 @@ async def test_webhook_route_rejects_unsigned_and_modified_payload(monkeypatch):
         called.append(args)
 
     monkeypatch.setattr('app.main.process_nowpayments_payment', fake_process)
+    queued = []
+    async def fake_enqueue(session, payment_id, invoice_id, order_id):
+        queued.append((order_id, invoice_id, payment_id))
+    monkeypatch.setattr('app.main.accept_finished_ipn', fake_enqueue)
     event = sample_event()
     sig = signature_for(event)
     async with httpx.AsyncClient(transport=httpx.ASGITransport(app=web),
@@ -82,6 +86,10 @@ async def test_webhook_route_processes_finished_only(monkeypatch):
         called.append(args)
 
     monkeypatch.setattr('app.main.process_nowpayments_payment', fake_process)
+    queued = []
+    async def fake_enqueue(session, payment_id, invoice_id, order_id):
+        queued.append((order_id, invoice_id, payment_id))
+    monkeypatch.setattr('app.main.accept_finished_ipn', fake_enqueue)
     async with httpx.AsyncClient(transport=httpx.ASGITransport(app=web),
                                  base_url='http://testserver') as client:
         waiting = sample_event('waiting')
@@ -94,6 +102,7 @@ async def test_webhook_route_processes_finished_only(monkeypatch):
                               headers={'x-nowpayments-sig': signature_for(finished)})
         assert r.status_code == 200
     assert called == [(None, '123', '456')]
+    assert queued == called
 
 
 @pytest.mark.asyncio
