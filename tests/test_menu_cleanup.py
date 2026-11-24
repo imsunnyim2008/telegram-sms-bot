@@ -11,6 +11,7 @@ from app.provider import PriceItem
 
 class MenuMessage:
     def __init__(self, *, deletion_fails=False):
+        self.chat = SimpleNamespace(id=77, type='private')
         self.events = []
         self.deletion_fails = deletion_fails
 
