@@ -45,7 +45,7 @@ MAIN = keyboard([
     [('💳 Top up', 'topup'), ('📋 My orders', 'orders')],
     [('📜 History', 'ui:history'), ('💸 Refunds', 'ui:refunds')],
     [('👤 My account', 'ui:account'), ('🎧 Support', 'ui:support')],
-    [('❓ Help', 'help')],
+    [('❓ Help', 'help'), ('🧹 Clear chat', 'ui:clear')],
 ])
 
 MAIN_ADMIN = keyboard([
@@ -53,7 +53,7 @@ MAIN_ADMIN = keyboard([
     [('💳 Top up', 'topup'), ('📋 My orders', 'orders')],
     [('📜 History', 'ui:history'), ('💸 Refunds', 'ui:refunds')],
     [('👤 My account', 'ui:account'), ('🎧 Support', 'ui:support')],
-    [('❓ Help', 'help')],
+    [('❓ Help', 'help'), ('🧹 Clear chat', 'ui:clear')],
     [('⚙️ Admin Settings', 'admin:settings')],
 ])
 
@@ -354,12 +354,12 @@ async def callbacks(callback: CallbackQuery):
             await show_selection_menu(callback.message, 'Welcome! Choose an option:',
                                       main_menu_for(uid), edit=True)
         elif data == 'admin:settings':
-            await clear_flow(uid)
             if uid not in settings.admins:
                 await callback.message.answer('Admin only')
             elif callback.message.chat.type != 'private':
                 await callback.message.answer('Open Friday in a private chat for admin settings.')
             else:
+                await clear_flow(uid)
                 await show_selection_menu(callback.message, ADMIN_HELP,
                                           admin_settings_keyboard(), edit=True)
         elif data == 'admin:home':
@@ -1278,11 +1278,7 @@ async def customer_support(message: Message):
 async def admin_tickets(message: Message):
     if not await private_admin(message):
         return
-    async with Session() as s:
-        rows = (await s.scalars(select(Setting).where(Setting.key.startswith('support_order:'))
-                                .order_by(Setting.value.desc()).limit(30))).all()
-    await message.answer('Support queue\n' + ('\n'.join(
-        f'Order #{row.key.split(":")[1]} • {row.value}' for row in rows) or 'No open tickets.'))
+    await ticket_picker(message)
 
 
 @router.message(Command('closeticket'))
@@ -1366,17 +1362,7 @@ async def admin_customer(message: Message):
     parts = message.text.split()
     if len(parts) != 2 or not parts[1].isdigit() or len(parts[1]) > 16:
         return await customer_picker(message, message.from_user.id)
-    uid = int(parts[1])
-    async with Session() as s:
-        user = await s.get(User, uid)
-        count = await s.scalar(select(func.count()).select_from(Activation)
-                               .where(Activation.user_id == uid))
-    if user is None:
-        return await message.answer('Customer not found.')
-    await message.answer(f'Customer {uid}\nOrders: {count}\n'
-                         f'Balance: {user.balance} {settings.wallet_currency}\n'
-                         f'Restricted: {"Yes" if user.is_banned else "No"}\n'
-                         'Use /ban or /unban only after review.')
+    await customer_card(message, int(parts[1]))
 
 
 
