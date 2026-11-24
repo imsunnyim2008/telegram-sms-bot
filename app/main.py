@@ -26,6 +26,7 @@ from .textverified_webhooks import (valid_signature as valid_textverified_signat
                                     parse_event as parse_textverified_event,
                                     wake_matching_orders)
 from .workers import Worker
+from .operations import accept_finished_ipn
 from .service_ui import custom_emoji_unavailable, without_custom_emoji
 from sqlalchemy.exc import IntegrityError
 
@@ -284,5 +285,8 @@ async def nowpayments_webhook(request: Request, background: BackgroundTasks):
         return {'ok': True}
     # Hosted invoice notifications may carry invoice_id=null. Local order_id
     # still uniquely links a customer to their previously created invoice.
+    # Persist the signed reference before acknowledging the callback. The worker
+    # can retry after a crash or an upstream timeout without double-crediting.
+    await accept_finished_ipn(Session, payment_id, invoice_id, order_id)
     background.add_task(process_nowpayments_payment, order_id, invoice_id, payment_id)
     return {'ok': True}
