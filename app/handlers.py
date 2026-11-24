@@ -354,6 +354,7 @@ async def callbacks(callback: CallbackQuery):
             await show_selection_menu(callback.message, 'Welcome! Choose an option:',
                                       main_menu_for(uid), edit=True)
         elif data == 'admin:settings':
+            await clear_flow(uid)
             if uid not in settings.admins:
                 await callback.message.answer('Admin only')
             elif callback.message.chat.type != 'private':
@@ -362,6 +363,7 @@ async def callbacks(callback: CallbackQuery):
                 await show_selection_menu(callback.message, ADMIN_HELP,
                                           admin_settings_keyboard(), edit=True)
         elif data == 'admin:home':
+            await clear_flow(uid)
             if uid in settings.admins:
                 await show_selection_menu(callback.message, 'Welcome! Choose an option:',
                                           main_menu_for(uid), edit=True)
@@ -1375,6 +1377,271 @@ async def admin_customer(message: Message):
                          f'Balance: {user.balance} {settings.wallet_currency}\n'
                          f'Restricted: {"Yes" if user.is_banned else "No"}\n'
                          'Use /ban or /unban only after review.')
+
+
+
+class ButtonRequest:
+    """Reuse existing command handlers with the real callback actor and chat."""
+    def __init__(self, target, actor, text):
+        self.target = target
+        self.from_user = actor
+        self.chat = target.chat
+        self.text = text
+
+    def __getattr__(self, name):
+        return getattr(self.target, name)
+
+
+async def order_picker(target, uid, action, *, edit=False):
+    async with Session() as s:
+        query = select(Activation).where(Activation.user_id == uid)
+        if action == 'done':
+            query = query.where(Activation.status.in_(('received', 'completed')),
+                                Activation.sms_notified.is_(True))
+        orders = (await s.scalars(query.order_by(Activation.id.desc()).limit(10))).all()
+    rows = [[(f'#{row.id} · {row.service.title()} · {row.status}', f'ui:{action}:{row.id}')]
+            for row in orders]
+    rows.append([('⬅️ Main menu', 'menu:home')])
+    await show_selection_menu(target, 'Select an order:' if orders else 'No matching orders.',
+                              keyboard(rows), edit=edit)
+
+
+async def customer_picker(target, uid, *, page=0, edit=False):
+    if uid not in settings.admins:
+        return await target.answer('Admin only')
+    page = max(0, min(page, 10000))
+    async with Session() as s:
+        users = (await s.scalars(select(User).order_by(User.id).offset(page * 8).limit(9))).all()
+    rows = [[(f'{("@" + row.username) if row.username else "Customer"} · {row.id}',
+              f'ui:customer:{row.id}')] for row in users[:8]]
+    nav = []
+    if page:
+        nav.append(('⬅️ Previous', f'ui:customers:{page - 1}'))
+    if len(users) > 8:
+        nav.append(('Next ➡️', f'ui:customers:{page + 1}'))
+    if nav:
+        rows.append(nav)
+    rows.append([('⬅️ Admin Settings', 'admin:settings')])
+    await show_selection_menu(target, '👥 Select a customer:' if users else 'No customers on this page.',
+                              keyboard(rows), edit=edit)
+
+
+async def customer_card(target, customer_id, *, edit=False):
+    async with Session() as s:
+        user = await s.get(User, customer_id)
+        count = await s.scalar(select(func.count()).select_from(Activation)
+                               .where(Activation.user_id == customer_id))
+    if not user:
+        return await target.answer('Customer not found.')
+    await show_selection_menu(
+        target, f'Customer {user.id}\nOrders: {count}\nBalance: {user.balance} {settings.wallet_currency}\n'
+        f'Restricted: {"Yes" if user.is_banned else "No"}',
+        keyboard([[('🔓 Unban' if user.is_banned else '🔒 Ban',
+                    f'ui:{"unban" if user.is_banned else "ban"}:{user.id}')],
+                  [('💰 Adjust balance', f'ui:adjust:{user.id}')],
+                  [('⬅️ Customers', 'ui:customers')]]), edit=edit)
+
+
+async def markup_picker(target, *, edit=False):
+    async with Session() as s:
+        row = await s.get(Setting, 'markup_percent')
+    current = row.value if row else settings.markup_percent
+    await show_selection_menu(target, f'📈 Current markup: {current}%\nChoose a new markup:',
+                              keyboard([[('0%', 'ui:percent:0'), ('25%', 'ui:percent:25')],
+                                        [('50%', 'ui:percent:50'), ('100%', 'ui:percent:100')],
+                                        [('✏️ Custom percentage', 'ui:input:markup')],
+                                        [('⬅️ Admin Settings', 'admin:settings')]]), edit=edit)
+
+
+async def ticket_picker(target, *, edit=False):
+    async with Session() as s:
+        rows = (await s.scalars(select(Setting).where(Setting.key.startswith('support_order:'))
+                                .order_by(Setting.value.desc()).limit(20))).all()
+    buttons = [[(f'Close ticket #{row.key.split(":")[1]}', f'ui:closeticket:{row.key.split(":")[1]}')]
+               for row in rows]
+    await show_selection_menu(target, '🎧 Open support tickets' if rows else 'No open tickets.',
+                              keyboard(buttons + [[('⬅️ Admin Settings', 'admin:settings')]]), edit=edit)
+
+
+async def review_picker(target, *, edit=False):
+    async with Session() as s:
+        rows = (await s.scalars(select(Activation).where(Activation.status == 'manual_review')
+                                .order_by(Activation.id.desc()).limit(20))).all()
+    buttons = [[(f'Review #{row.id} · {row.service.title()}', f'ui:revieworder:{row.id}')]
+               for row in rows]
+    await show_selection_menu(target, 'Review provider allocation independently before any refund.'
+                              if rows else 'No orders under manual review.',
+                              keyboard(buttons + [[('⬅️ Admin Settings', 'admin:settings')]]), edit=edit)
+
+
+async def prompt_button_input(target, uid, action, *, customer_id=None, edit=False):
+    if uid not in settings.admins:
+        return await target.answer('Admin only')
+    prompts = {
+        'markup': 'Enter only the new markup percentage (0–500).',
+        'reconcilepayment': 'Enter the NOWPayments payment ID only. Friday will verify it before crediting.',
+        'broadcast': 'Enter the announcement text (up to 1000 characters). Do not include private data.',
+        'adjust': 'Enter the signed amount only (positive to credit, negative to debit).',
+    }
+    if action not in prompts:
+        return await target.answer('Invalid action.')
+    await save_flow(uid, {'type': 'button_input', 'action': action, 'customer_id': customer_id})
+    await show_selection_menu(target, prompts[action],
+                              keyboard([[('Cancel', 'ui:cancel')]]), edit=edit)
+
+
+async def stage_confirmation(target, uid, action, value, description, *, edit=False):
+    nonce = token_hex(8)
+    await save_flow(uid, {'type': 'button_confirm', 'action': action,
+                          'value': value, 'nonce': nonce})
+    await show_selection_menu(target, 'Confirm action:\n' + description,
+                              keyboard([[('✅ Confirm', f'ui:confirm:{nonce}'), ('❌ Cancel', 'ui:cancel')]]),
+                              edit=edit)
+
+
+async def consume_confirmation(uid, nonce):
+    async with Session.begin() as s:
+        row = await s.get(Setting, flow_key(uid), with_for_update=True)
+        if row is None:
+            return None
+        try:
+            flow = json.loads(row.value)
+            if (flow.get('type') != 'button_confirm' or flow.get('nonce') != nonce
+                    or int(flow.get('expires', 0)) < int(time.time())):
+                return None
+        except (ValueError, TypeError, AttributeError):
+            return None
+        await s.delete(row)
+        return flow
+
+
+async def handle_button_input(message, uid, flow, raw):
+    action = flow.get('action')
+    if action in ('markup', 'adjust'):
+        try:
+            amount = Decimal(raw)
+            if not amount.is_finite() or len(raw) > 18:
+                raise ValueError()
+            if action == 'markup' and not 0 <= amount <= 500:
+                raise ValueError()
+            if action == 'adjust' and (amount == 0 or abs(amount) > Decimal('1000000')):
+                raise ValueError()
+        except (ValueError, InvalidOperation):
+            return await message.answer('Invalid amount. Enter a valid number, or press Cancel.')
+        if action == 'adjust':
+            await save_flow(uid, {'type': 'button_input', 'action': 'adjust_reason',
+                                  'customer_id': flow['customer_id'], 'amount': str(amount)})
+            return await show_selection_menu(message, 'Enter a short reason for the wallet adjustment.',
+                                             keyboard([[('Cancel', 'ui:cancel')]]))
+        return await stage_confirmation(message, uid, 'markup', str(amount), f'Set markup to {amount}%.')
+    if action == 'adjust_reason':
+        if not 1 <= len(raw) <= 240:
+            return await message.answer('Enter a reason of 1–240 characters.')
+        value = f'{flow["customer_id"]} {flow["amount"]} {raw}'
+        return await stage_confirmation(message, uid, 'adjust', value,
+                                        f'Customer {flow["customer_id"]}\nAmount: {flow["amount"]}\nReason: {raw}')
+    if action == 'reconcilepayment':
+        if not raw.isascii() or not raw.isdigit() or len(raw) > 40:
+            return await message.answer('Enter a valid numeric NOWPayments payment ID.')
+        return await stage_confirmation(message, uid, action, raw, f'Verify payment {raw} and reconcile if eligible.')
+    if action == 'broadcast':
+        if len(raw) > 1000:
+            return await message.answer('Maximum announcement length is 1000 characters.')
+        return await stage_confirmation(message, uid, action, raw, 'Send this announcement to customers:\n' + raw)
+
+
+async def button_action(callback, uid, action):
+    target, actor = callback.message, callback.from_user
+    parts = action.split(':')
+    name = parts[0]
+    public = {'history', 'refunds', 'account', 'support', 'receipt', 'done', 'check', 'order', 'clear'}
+    if name not in public and uid not in settings.admins:
+        return await target.answer('Admin only')
+    if name == 'confirm' and len(parts) == 2:
+        flow = await consume_confirmation(uid, parts[1])
+        if not flow:
+            return await target.answer('Confirmation expired or already used.')
+        command = flow['action']
+        handlers = {'markup': admin_markup, 'adjust': admin_adjust, 'broadcast': admin_broadcast,
+                    'reconcilepayment': admin_reconcile_nowpayment, 'ban': admin_ban,
+                    'unban': admin_ban, 'closeticket': admin_close_ticket, 'resolve': admin_resolve}
+        if command in handlers:
+            return await handlers[command](ButtonRequest(target, actor, f'/{command} {flow["value"]}'))
+        return
+    await clear_flow(uid)
+    if name == 'cancel':
+        return await show_selection_menu(target, 'Cancelled. Admin Settings', admin_settings_keyboard(), edit=True)
+    if name == 'maintenance':
+        return await maintenance_picker(target, edit=True)
+    if name == 'maint' and len(parts) == 2 and parts[1] in ('on', 'off'):
+        await set_maintenance(parts[1])
+        return await maintenance_picker(target, edit=True)
+    if name == 'customers':
+        return await customer_picker(target, uid, page=int(parts[1]) if len(parts) == 2 else 0, edit=True)
+    if name == 'customer' and len(parts) == 2:
+        return await customer_card(target, int(parts[1]), edit=True)
+    if name == 'markup':
+        return await markup_picker(target, edit=True)
+    if name == 'percent' and len(parts) == 2 and parts[1] in ('0', '25', '50', '100'):
+        return await stage_confirmation(target, uid, 'markup', parts[1], f'Set markup to {parts[1]}%.', edit=True)
+    if name == 'tickets':
+        return await ticket_picker(target, edit=True)
+    if name == 'review':
+        return await review_picker(target, edit=True)
+    if name == 'revieworder' and len(parts) == 2:
+        aid = int(parts[1])
+        async with Session() as s:
+            row = await s.get(Activation, aid)
+        if not row or row.status != 'manual_review':
+            return await target.answer('Order is not under manual review.')
+        return await show_selection_menu(target, f'Order #{aid} · {row.service}\n'
+                                         f'Wallet charge: {row.price_charged}\n'
+                                         'Confirm external provider allocation independently before authorizing a refund.',
+                                         keyboard([[('Authorize refund', f'ui:resolve:{aid}')],
+                                                   [('⬅️ Review orders', 'ui:review')]]), edit=True)
+    if name in ('ban', 'unban', 'closeticket', 'resolve') and len(parts) == 2:
+        value = str(int(parts[1]))
+        if name == 'resolve':
+            value += ' refund'
+        return await stage_confirmation(target, uid, name, value, f'{name.title()} {value}?', edit=True)
+    if name == 'adjust' and len(parts) == 2:
+        return await prompt_button_input(target, uid, 'adjust', customer_id=int(parts[1]), edit=True)
+    if name in ('broadcast', 'reconcilepayment'):
+        return await prompt_button_input(target, uid, name, edit=True)
+    if name == 'input' and parts == ['input', 'markup']:
+        return await prompt_button_input(target, uid, 'markup', edit=True)
+    if name in ('support', 'receipt', 'done', 'check'):
+        if len(parts) == 1:
+            return await order_picker(target, uid, name, edit=True)
+        if len(parts) == 2:
+            aid = int(parts[1])
+            if name == 'check':
+                return await check_sms(target, uid, aid, edit=True)
+            if name == 'done':
+                return await mark_customer_done(target, uid, aid)
+            handler = customer_support if name == 'support' else order_receipt
+            return await handler(ButtonRequest(target, actor, f'/{name} {aid}'))
+    if name == 'order' and len(parts) == 2:
+        aid = int(parts[1])
+        async with Session() as s:
+            row = await s.get(Activation, aid)
+        if not row or row.user_id != uid:
+            return await target.answer('Order not found.')
+        rows = [[('🔄 Check status', f'ui:check:{aid}'), ('🧾 Receipt', f'ui:receipt:{aid}')],
+                [('🎧 Support', f'ui:support:{aid}')]]
+        if row.sms_notified and row.status in ('received', 'completed'):
+            rows.append([('✅ Verification Done', f'ui:done:{aid}')])
+        if row.status == 'pending':
+            rows.append([('❌ Cancel order', f'cancel:{aid}')])
+        rows.append([('⬅️ My orders', 'orders')])
+        return await show_selection_menu(target, f'Order #{aid} · {row.service.title()}\nStatus: {row.status}',
+                                         keyboard(rows), edit=True)
+    read_handlers = {'history': transaction_history, 'refunds': transaction_history, 'account': customer_account,
+                     'stats': admin_stats, 'dailyreport': admin_dailyreport, 'testall': admin_testall,
+                     'setupcheck': admin_setupcheck, 'clear': clear_chat_command}
+    if name in read_handlers and len(parts) == 1:
+        return await read_handlers[name](ButtonRequest(target, actor, f'/{name}'))
+    await target.answer('Invalid selection.')
 
 
 @router.message(F.text)
