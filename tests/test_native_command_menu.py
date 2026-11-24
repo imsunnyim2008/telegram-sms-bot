@@ -37,7 +37,8 @@ async def test_native_menu_has_only_all_working_public_commands():
     assert {row[2].chat_id for row in commands[2:]} == {42, 73}
     assert any(isinstance(row[1], MenuButtonCommands) for row in bot.calls
                if row[0] == 'menu')
-    expected = ['start', 'buy', 'balance', 'topup', 'orders', 'check', 'help', 'clear']
+    expected = ['start', 'buy', 'balance', 'topup', 'orders', 'check', 'history', 'refunds',
+                'receipt', 'account', 'done', 'support', 'help', 'clear']
     for _, cmds, _ in commands:
         assert [c.command for c in cmds] == expected
         assert 'pricing' not in [c.command for c in cmds]
@@ -88,7 +89,9 @@ async def test_admin_settings_only_in_admin_main_menu(monkeypatch):
                      for b in row]
     assert '⚙️ Admin Settings' in admin_buttons
     assert '⚙️ Admin Settings' not in guest_buttons
-    assert guest_buttons == ['📱 Buy number', '💰 Balance', '💳 Top up', '📋 My orders', '❓ Help']
+    assert guest_buttons == ['📱 Buy number', '💰 Balance', '💳 Top up', '📋 My orders',
+                             '📜 History', '💸 Refunds', '👤 My account', '🎧 Support',
+                             '❓ Help', '🧹 Clear chat']
 
 
 @pytest.mark.asyncio
@@ -121,6 +124,9 @@ async def test_admin_callback_cannot_show_settings_to_other_users(monkeypatch):
     async def allow(uid, target):
         return True
     monkeypatch.setattr(handlers, 'allowed', allow)
+    async def clear_flow(uid):
+        pass
+    monkeypatch.setattr(handlers, 'clear_flow', clear_flow)
     guest, admin = FakeMessage(99), FakeMessage(42)
     await handlers.callbacks(FakeCallback(99, guest, 'admin:settings'))
     assert guest.answers[0][0] == 'Admin only'
