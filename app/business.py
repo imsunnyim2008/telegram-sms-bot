@@ -116,6 +116,9 @@ class Shop:
         if await self.provider.get_balance() < item.cost:
             raise BotError('Provider balance is insufficient. Please try again later.')
         async with Session.begin() as s:
+            pause = await s.get(Setting, 'purchase_maintenance')
+            if pause and pause.value == 'on':
+                raise BotError('New purchases are paused for maintenance. Existing orders remain available.')
             user = (await s.execute(select(User).where(User.id == user_id).with_for_update())).scalar_one()
             if user.is_banned or not user.accepted_terms:
                 raise BotError('Account is not enabled')
