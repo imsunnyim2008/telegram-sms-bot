@@ -39,7 +39,12 @@ def test_signature_and_payload():
     data = parse_transfer(body)
     assert data['amount_kobo'] == 10000
     assert 'private' not in str(data)
-    assert parse_transfer(b'{"eventType":"V1_POS_WITHDRAWAL_TRANSACTION"}') is None
+    assert parse_transfer(b'{"eventType":"V1_POS_PURCHASE_TRANSACTION"}') is None
+    with pytest.raises(ValueError):
+        parse_transfer(b'{"eventType":"V1_POS_WITHDRAWAL_TRANSACTION"}')
+    withdrawal = json.loads(body)
+    withdrawal['eventType'] = 'V1_POS_WITHDRAWAL_TRANSACTION'
+    assert parse_transfer(json.dumps(withdrawal).encode())['event_type'] == 'V1_POS_WITHDRAWAL_TRANSACTION'
 
 
 @pytest.mark.asyncio

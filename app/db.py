@@ -161,6 +161,31 @@ class MoniepointEvent(Base):
     received_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utcnow)
 
 
+class BankEventMatch(Base):
+    """Hashed identifiers from an authenticated bank event, never raw bank data."""
+    __tablename__ = 'bank_event_matches'
+    event_key: Mapped[str] = mapped_column(ForeignKey('moniepoint_events.event_key'), primary_key=True)
+    rrn_key: Mapped[str | None] = mapped_column(String(64), index=True)
+    sender_key: Mapped[str | None] = mapped_column(String(64), index=True)
+
+
+class BankDeposit(Base):
+    __tablename__ = 'bank_deposits'
+    id: Mapped[int] = mapped_column(Integer, primary_key=True)
+    user_id: Mapped[int] = mapped_column(ForeignKey('users.id'), index=True)
+    amount_kobo: Mapped[int] = mapped_column(BigInteger)
+    rate: Mapped[Decimal] = mapped_column(Numeric(16, 4))
+    credit: Mapped[Decimal] = mapped_column(Numeric(16, 4))
+    method: Mapped[str] = mapped_column(String(8))
+    match_key: Mapped[str] = mapped_column(String(64))
+    alternate_key: Mapped[str | None] = mapped_column(String(64))
+    status: Mapped[str] = mapped_column(String(16), default='pending', index=True)
+    verified_transaction: Mapped[str | None] = mapped_column(String(64), unique=True)
+    payment_id: Mapped[int | None] = mapped_column(ForeignKey('payments.id'), unique=True)
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utcnow)
+    resolved_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+
+
 class Setting(Base):
     __tablename__ = 'settings'
     key: Mapped[str] = mapped_column(String(80), primary_key=True)

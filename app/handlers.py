@@ -18,7 +18,8 @@ from .business import BotError
 from .config import settings
 from .country_ui import arrange_country_offers, country_flag
 from .command_menu import PUBLIC_HELP, ADMIN_HELP
-from .db import Activation, AdminAudit, LedgerEntry, Payment, Session, Setting, SupportMessage, User, utcnow
+from .db import Activation, AdminAudit, BankDeposit, LedgerEntry, Payment, Session, Setting, SupportMessage, User, utcnow
+from . import bank_deposits as bank
 from .operations import LAGOS, STARTED_AT, audit, claim_purchase, notice, report, risk_summary
 from .moniepoint import pilot_status
 from .auto_maintenance import acknowledge, manual_mode
@@ -75,6 +76,7 @@ def admin_settings_keyboard() -> InlineKeyboardMarkup:
         [('🛡 Risk review', 'ui:risk'), ('📜 Admin activity', 'ui:audit')],
         [('🔍 Find customer', 'ui:searchcustomer'), ('💵 Low balance alert', 'ui:lowthreshold')],
         [('📡 Health dashboard', 'ui:health'), ('🏦 Moniepoint pilot', 'ui:moniepoint')],
+        [('🏦 Bank transfers', 'ui:bankadmin')],
         [('🔌 API setup check', 'ui:setupcheck'), ('👥 Customers', 'ui:customers')],
         [('🎧 Support tickets', 'ui:tickets'), ('💳 Reconcile payment', 'ui:reconcilepayment')],
         [('📣 Broadcast', 'ui:broadcast'), ('⚖️ Review orders', 'ui:review')],
@@ -823,9 +825,16 @@ async def send_topup_invoice(target, uid: int, raw: str) -> bool:
     return True
 
 
-async def prompt_topup(target, uid: int, *, edit: bool = False):
+async def prompt_topup(target, uid: int, *, edit: bool = False, crypto_only=False):
     if hasattr(target, 'chat') and target.chat.type != 'private':
         return await target.answer('Open Friday in a private chat to top up.')
+    cfg = await bank.config(Session)
+    if bank.ready(cfg) and not crypto_only:
+        await clear_flow(uid)
+        return await show_selection_menu(target, 'Choose a deposit method:',
+            keyboard([[('🇳🇬 Nigerian bank transfer', 'ui:bankstart')],
+                      [('🪙 Cryptocurrency', 'ui:bankcrypto')],
+                      [('My bank claims', 'ui:bankclaims')], [('⬅️ Main menu', 'menu:home')]]), edit=edit)
     await save_flow(uid, {'type': 'topup'})
     await show_selection_menu(
         target,
@@ -1587,7 +1596,8 @@ async def button_action(callback, uid, action):
     parts = action.split(':')
     name = parts[0]
     public = {'history', 'refunds', 'account', 'support', 'receipt', 'done', 'check', 'order', 'clear',
-              'deposits', 'depositreceipt', 'filterorders', 'thread', 'supportwrite', 'opcancel'}
+              'deposits', 'depositreceipt', 'filterorders', 'thread', 'supportwrite', 'opcancel',
+              'bankstart', 'bankcrypto', 'bankclaims', 'bankmethod'}
     if name not in public and uid not in settings.admins:
         return await target.answer('Admin only')
     if name == 'ackoutage' and len(parts) == 2:
@@ -1605,7 +1615,19 @@ async def button_action(callback, uid, action):
         if command in handlers:
             return await handlers[command](ButtonRequest(target, actor, f'/{command} {flow["value"]}'))
         return
+    if name == 'bankfinal':
+        flow = await read_flow(uid)
+        await clear_flow(uid)
+        if not flow or flow.get('type') != 'bank_approve':
+            return await target.answer('Confirmation expired.')
+        try:
+            await bank.approve(Session, uid, int(flow['claim']), flow['event'])
+            return await target.answer('Confirmed bank deposit credited once.')
+        except ValueError as exc:
+            return await target.answer(str(exc))
     await clear_flow(uid)
+    if await bank_button(target, uid, parts):
+        return
     if await operations_button(target, uid, parts):
         return
     if name == 'cancel':
@@ -1731,6 +1753,171 @@ async def support_thread(target, uid, aid):
             buttons.append([('Close ticket', f'ui:closeticket:{aid}')])
     buttons.append([('⬅️ Back', 'ui:tickets' if uid in settings.admins else 'orders')])
     await show_selection_menu(target, '\n'.join(lines), keyboard(buttons), edit=True)
+
+
+
+async def bank_admin_card(target, edit=True):
+    cfg = await bank.config(Session)
+    await show_selection_menu(target,
+        '🏦 Direct bank transfers\n'
+        f'Account name: {cfg.get("name", "not set")}\n'
+        f'Account number: {cfg.get("account", "not set")}\n'
+        f'NGN per USD: {cfg.get("rate", "not set")}\n'
+        f'Customer deposits: {"enabled" if bank.ready(cfg) else "disabled"}\n'
+        'Authenticated event matching + administrator confirmation of settled incoming payment.',
+        keyboard([[('Set account name', 'ui:bankset:name'), ('Set account number', 'ui:bankset:account')],
+                  [('Exchange rate', 'ui:bankset:rate')],
+                  [('Enable', 'ui:banktoggle:on'), ('Disable', 'ui:banktoggle:off')],
+                  [('Review deposit claims', 'ui:bankreview')],
+                  [('⬅️ Admin Settings', 'admin:settings')]]), edit=edit)
+
+
+async def bank_review_card(target, claim_id):
+    async with Session() as s:
+        row = await s.get(BankDeposit, claim_id)
+    if not row:
+        return await target.answer('Claim not found.')
+    matches = await bank.candidates(Session, claim_id) if row.status == 'pending' else []
+    text = (f'Bank claim #{row.id}\nCustomer: {row.user_id}\n'
+            f'Amount: NGN {Decimal(row.amount_kobo)/100:.2f}\n'
+            f'Wallet credit: USD {row.credit}\n'
+            f'Matching method: {row.method}\nStatus: {row.status}\n'
+            f'Authenticated candidate transactions: {len(matches)}\n'
+            'A matching POS event does not prove funds entered your account. Check the incoming settled credit, account and customer in Moniepoint.')
+    buttons = []
+    if row.status == 'pending':
+        if len(matches) == 1:
+            text += f'\nTransaction fingerprint: {matches[0].transaction_key[:12]}'
+            buttons.append([('Confirm settled incoming transfer', f'ui:bankconfirm:{row.id}')])
+        buttons.append([('Reject claim', f'ui:bankreject:{row.id}')])
+    buttons.append([('⬅️ Review claims', 'ui:bankreview')])
+    await show_selection_menu(target, text, keyboard(buttons), edit=True)
+
+
+async def bank_button(target, uid, parts):
+    name = parts[0]
+    if name == 'bankcrypto':
+        await prompt_topup(target, uid, edit=True, crypto_only=True)
+    elif name == 'bankstart':
+        cfg = await bank.config(Session)
+        if not bank.ready(cfg):
+            await target.answer('Bank transfers are currently unavailable.')
+        else:
+            await save_flow(uid, {'type': 'bank_input', 'action': 'amount'})
+            await show_selection_menu(target,
+                f'🏦 Moniepoint bank transfer\nEnter any positive amount in naira (up to two decimal places).\n'
+                f'Exchange rate: NGN {cfg["rate"]} per USD.\nNo $5 minimum for bank transfers.',
+                keyboard([[('Cancel', 'ui:opcancel')]]), edit=True)
+    elif name == 'bankmethod' and len(parts) == 3 and parts[1] in ('id', 'name'):
+        # The quote is persisted separately from button flow, which is cleared on navigation.
+        async with Session() as s:
+            quote = await s.get(Setting, f'bankquote:{uid}')
+        if not quote:
+            await target.answer('Open Bank transfer again.')
+        else:
+            q = json.loads(quote.value)
+            if q['nonce'] != parts[2] or q['expires'] < time.time():
+                await target.answer('Quote expired. Open Bank transfer again.')
+            else:
+                await save_flow(uid, {'type': 'bank_input', 'action': 'claim', 'method': parts[1], **q})
+                await show_selection_menu(target,
+                    'Enter the exact transaction ID from your transfer receipt.' if parts[1]=='id'
+                    else 'Enter the full sender name as shown on the bank transfer. Name matching requires review.',
+                    keyboard([[('Cancel', 'ui:opcancel')]]), edit=True)
+    elif name == 'bankclaims':
+        async with Session() as s:
+            rows = (await s.scalars(select(BankDeposit).where(BankDeposit.user_id == uid)
+                                    .order_by(BankDeposit.id.desc()).limit(10))).all()
+        body = 'Your bank deposit claims\n' + ('\n'.join(
+            f'#{r.id}: NGN {Decimal(r.amount_kobo)/100:.2f} · {r.status}' for r in rows) or 'No claims yet.')
+        await show_selection_menu(target, body, keyboard([[('⬅️ Main menu', 'menu:home')]]), edit=True)
+    elif uid not in settings.admins:
+        return False
+    elif name == 'bankadmin':
+        await bank_admin_card(target)
+    elif name == 'bankset' and len(parts)==2 and parts[1] in ('name','account','rate'):
+        await save_flow(uid, {'type':'bank_input','action':'config','field':parts[1]})
+        await show_selection_menu(target, {'name':'Enter bank account name.', 'account':'Enter 10-digit Moniepoint account number.',
+                                          'rate':'Enter NGN per USD exchange rate.'}[parts[1]],
+                                  keyboard([[('Cancel','ui:opcancel')]]), edit=True)
+    elif name == 'banktoggle' and len(parts)==2 and parts[1] in ('on','off'):
+        try:
+            await bank.update_config(Session,uid,'enabled',parts[1]=='on')
+            await bank_admin_card(target)
+        except ValueError as exc:
+            await target.answer(str(exc))
+    elif name == 'bankreview':
+        async with Session() as s:
+            rows = (await s.scalars(select(BankDeposit).where(BankDeposit.status=='pending')
+                                    .order_by(BankDeposit.id).limit(20))).all()
+        await show_selection_menu(target, 'Pending bank claims' if rows else 'No pending claims.',
+            keyboard([[(f'#{r.id} · NGN {Decimal(r.amount_kobo)/100:.2f}', f'ui:bankview:{r.id}')] for r in rows]
+                      + [[('⬅️ Bank transfers','ui:bankadmin')]]), edit=True)
+    elif name == 'bankview' and len(parts)==2:
+        await bank_review_card(target,int(parts[1]))
+    elif name == 'bankconfirm' and len(parts)==2:
+        claim_id=int(parts[1])
+        matches=await bank.candidates(Session,claim_id)
+        if len(matches)!=1:
+            await target.answer('No unique authenticated match.')
+        else:
+            await save_flow(uid, {'type':'bank_approve','claim':claim_id,'event':matches[0].event_key})
+            await show_selection_menu(target,
+                'Only confirm if you independently checked the actual incoming settled credit in Moniepoint, and confirmed that this customer made the transfer. Never approve withdrawals or outgoing transfers.',
+                keyboard([[('I verified the settled incoming payment','ui:bankfinal'),('Cancel','ui:opcancel')]]),edit=True)
+    elif name == 'bankreject' and len(parts)==2:
+        try:
+            await bank.reject(Session,uid,int(parts[1]))
+            await target.answer('Claim rejected. No wallet credited.')
+        except ValueError as exc:
+            await target.answer(str(exc))
+    else:
+        return False
+    return True
+
+
+async def bank_input(message,uid,flow,raw):
+    try:
+        action=flow.get('action')
+        if action=='config':
+            await bank.update_config(Session,uid,flow['field'],raw)
+            await clear_flow(uid)
+            return await message.answer('Saved. Open Admin → Bank transfers to view or enable.')
+        if not await private_customer(message):
+            return
+        cfg=await bank.config(Session)
+        if not bank.ready(cfg):
+            raise ValueError('Bank deposits are unavailable.')
+        if action=='amount':
+            kobo=bank.amount_kobo(raw)
+            q={'kobo':kobo,'rate':cfg['rate'],'nonce':token_hex(6),'expires':time.time()+86400,
+               'account':cfg['account'],'name':cfg['name']}
+            async with Session.begin() as s:
+                row=await s.get(Setting,f'bankquote:{uid}',with_for_update=True)
+                if row:
+                    row.value=json.dumps(q)
+                else:
+                    s.add(Setting(key=f'bankquote:{uid}',value=json.dumps(q)))
+            await clear_flow(uid)
+            return await show_selection_menu(message,
+                f'🇳🇬 Transfer to Moniepoint\nAccount name: {cfg["name"]}\nAccount number: {cfg["account"]}\n'
+                f'Amount: NGN {Decimal(kobo)/100:.2f}\nRate: NGN {cfg["rate"]}/USD\n'
+                'After sending, choose how to verify your transfer. Never send an OTP or bank password.',
+                keyboard([[('Transaction ID',f'ui:bankmethod:id:{q["nonce"]}')],
+                          [('Sender full name',f'ui:bankmethod:name:{q["nonce"]}')],
+                          [('Cancel','ui:opcancel')]]))
+        if action=='claim':
+            if flow['expires']<time.time() or cfg['account']!=flow['account'] or cfg['name']!=flow['name']:
+                raise ValueError('Bank details or quote changed. Open a new quote and contact support if already paid.')
+            cid=await bank.create_claim(Session,uid,flow['kobo'],flow['rate'],flow['method'],raw)
+            await clear_flow(uid)
+            matches=await bank.candidates(Session,cid)
+            return await message.answer(f'Claim #{cid} recorded. '
+                + ('Authenticated matching event found. Awaiting settlement review.' if len(matches)==1 else
+                   'No unique authenticated event yet. Awaiting review; do not transfer again.'),
+                reply_markup=keyboard([[('My bank claims','ui:bankclaims')]]))
+    except ValueError as exc:
+        await message.answer(str(exc))
 
 
 async def operations_button(target, uid, parts):
@@ -1898,6 +2085,8 @@ async def handle_pending_text(message: Message):
     flow = await read_flow(uid)
     if not flow:
         return
+    if flow.get('type') == 'bank_input':
+        return await bank_input(message, uid, flow, raw)
     if flow.get('type') == 'ops_input':
         return await operations_input(message, uid, flow, raw)
     if flow.get('type') == 'button_input':
