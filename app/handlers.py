@@ -280,11 +280,6 @@ async def callbacks(callback: CallbackQuery):
             await remove_previous_menu(callback.message)
         elif data.startswith('buy:'):
             _, service, country = data.split(':')
-            async with Session() as s:
-                pause = await s.get(Setting, 'purchase_maintenance')
-            if pause and pause.value == 'on':
-                await callback.message.answer('New purchases are paused for maintenance. Existing orders and refunds remain available.')
-                return
             order = await shop.buy(uid, service, country)
             await send_branded_message(
                 callback.message,
