@@ -5,7 +5,7 @@ import re
 from datetime import timedelta
 from decimal import Decimal, InvalidOperation, ROUND_DOWN
 
-from sqlalchemy import select
+from sqlalchemy import or_, select
 from sqlalchemy.exc import IntegrityError
 
 from .config import settings
@@ -54,11 +54,11 @@ async def update_config(session, actor, field, value):
         elif field == 'rate':
             try:
                 rate = Decimal(value)
-                if not rate.is_finite() or not 0 < rate <= 1000000 or rate.as_tuple().exponent < -4:
+                if not rate.is_finite() or not Decimal('1') <= rate <= 1000000 or rate.as_tuple().exponent < -4:
                     raise ValueError()
                 value = str(rate)
             except (InvalidOperation, ValueError):
-                raise ValueError('Enter a positive NGN per USD rate.')
+                raise ValueError('Enter an NGN per USD rate between 1 and 1,000,000.')
         elif field == 'enabled':
             if value and not ready({**cfg, 'enabled': True}):
                 raise ValueError('Set bank details, exchange rate and signing secret first.')
@@ -99,7 +99,8 @@ async def create_claim(session, uid, kobo, rate, method, raw):
         if len(pending) >= 5:
             raise ValueError('You have five pending claims. Contact support before creating another.')
         row = BankDeposit(user_id=uid, amount_kobo=kobo, rate=rate, credit=credit,
-                          method=method, match_key=match_key, status='pending')
+                          method=method, match_key=match_key,
+                          alternate_key=identity_key(raw) if method == 'id' else None, status='pending')
         s.add(row)
         await s.flush()
         for admin in settings.admins:
@@ -124,7 +125,8 @@ async def candidates(session, claim_id):
             ~MoniepointEvent.transaction_key.in_(select(BankDeposit.verified_transaction)
                 .where(BankDeposit.verified_transaction.is_not(None))))
         if claim.method == 'id':
-            query = query.where(MoniepointEvent.transaction_key == claim.match_key)
+            query = query.where(or_(MoniepointEvent.transaction_key == claim.match_key,
+                                    BankEventMatch.rrn_key == claim.alternate_key))
         else:
             query = query.where(BankEventMatch.sender_key == claim.match_key)
         rows = (await s.scalars(query.order_by(MoniepointEvent.received_at.desc()).limit(20))).all()
