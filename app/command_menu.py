@@ -19,6 +19,12 @@ PUBLIC_COMMANDS = [
     BotCommand(command='topup', description='Add funds to your wallet'),
     BotCommand(command='orders', description='View your purchased numbers'),
     BotCommand(command='check', description='Check SMS for an order'),
+    BotCommand(command='history', description='View wallet transactions'),
+    BotCommand(command='refunds', description='View confirmed refunds'),
+    BotCommand(command='receipt', description='Select an order receipt'),
+    BotCommand(command='account', description='View account statistics'),
+    BotCommand(command='done', description='Select a delivered order to confirm'),
+    BotCommand(command='support', description='Select an order for support'),
     BotCommand(command='help', description='How to use Friday'),
     BotCommand(command='clear', description='Clear recent chat messages'),
 ]
@@ -30,13 +36,13 @@ PUBLIC_HELP = (
     '/balance — Check your wallet balance\n'
     '/topup — Enter your deposit amount (minimum $5)\n'
     '/orders — Show recent purchases\n'
-    '/check 7 — Check SMS for order #7 (replace 7 with your order ID)\n'
+    '/check — Select an order to check\n'
     '/history — Recent wallet transactions\n'
     '/refunds — Confirmed refund history\n'
-    '/receipt ORDER_ID — Download your order record\n'
+    '/receipt — Download your order record\n'
     '/account — Your account statistics\n'
-    '/done ORDER_ID — Confirm verification yourself\n'
-    '/support ORDER_ID — Request an order review\n'
+    '/done — Confirm verification yourself\n'
+    '/support — Request an order review\n'
     '/help — Show these instructions\n'
     '/clear — Clear recent chat messages (confirmation required)\n\n'
     'Use the blue Menu button beside the message field to access these commands. '
@@ -69,7 +75,7 @@ ADMIN_HELP = (
     '/reconcilepayment PAYMENT_ID — Verify and recover a finished payment\n\n'
     '🔒 These commands are restricted to the bot administrator and are '
     'deliberately hidden from the public Menu button. '
-    'Some commands require a user ID or order ID.'
+    'Tap the buttons below instead of typing commands. Only custom values need text input.'
 )
 
 
