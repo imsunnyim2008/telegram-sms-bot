@@ -1,6 +1,7 @@
 """Operational records; no secrets or raw payment payloads are stored here."""
 import asyncio
 import logging
+import time
 from datetime import timedelta, timezone
 from decimal import Decimal
 from zoneinfo import ZoneInfo
@@ -15,6 +16,7 @@ from .db import (Activation, AdminAudit, LedgerEntry, OpsNotice, Payment,
 
 log = logging.getLogger(__name__)
 LAGOS = ZoneInfo('Africa/Lagos')
+STARTED_AT = time.monotonic()
 
 
 async def insert_once(s, model, key, values):
@@ -167,7 +169,7 @@ async def schedule_daily_report(session):
             s.add(Setting(key='ops_daily_report', value=day))
 
 
-async def risk_summary(session):
+async def risk_summary(session, *, flags_only=False):
     """Review flags only: no bans, wallet changes, or claims of fraud."""
     since = utcnow() - timedelta(hours=24)
     async with session() as s:
@@ -181,8 +183,20 @@ async def risk_summary(session):
         ).limit(20))).all()
         pending = await s.scalar(select(func.count()).select_from(PaymentInbox)
                                  .where(PaymentInbox.status == 'review'))
+    if flags_only and not (high or mismatches or pending):
+        return None
     return ('Risk review (flags only, not proof of fraud)\n'
             + ('High order volume: ' + ', '.join(f'{uid}: {n}' for uid, n in high)
                if high else 'No high-volume accounts in last 24h')
             + '\nLedger mismatches: ' + (', '.join(map(str, mismatches)) or 'none')
             + f'\nPayment inbox review: {pending}')
+
+
+async def schedule_risk_alert(session):
+    day = utcnow().astimezone(LAGOS).date().isoformat()
+    body = await risk_summary(session, flags_only=True)
+    if not body:
+        return
+    async with session.begin() as s:
+        for admin in settings.admins:
+            await notice(s, f'risk:{day}:{admin}', admin, body)
