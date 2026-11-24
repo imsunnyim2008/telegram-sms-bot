@@ -99,7 +99,10 @@ async def test_topup_prompts_and_rejects_under_5_without_creating_invoice(setup_
     session, shop, gateway = setup_database
     message = Target(uid=99)
     await handlers.prompt_topup(message, 99)
-    assert 'Minimum deposit: $5' in message.answers[0][0]
+    assert 'Choose a deposit method' in message.answers[0][0]
+    assert await handlers.read_flow(99) is None
+    await handlers.bank_button(message, 99, ['bankcrypto'])
+    assert 'Minimum deposit: $5' in message.answers[-1][0]
     assert (await handlers.read_flow(99))['type'] == 'topup'
     message.text = '4'
     await handlers.handle_pending_text(message)
