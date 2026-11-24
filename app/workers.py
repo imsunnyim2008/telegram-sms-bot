@@ -5,13 +5,13 @@ import time
 from datetime import timedelta, timezone
 from html import escape
 
-from sqlalchemy import delete, select
+from sqlalchemy import delete, func, or_, select
 
 from .auto_maintenance import mark_notice_sent, observe, pending_notices
 from .config import settings
-from .db import Activation, MaintenanceNotice, Payment, Session, Setting, User, utcnow
+from .db import Activation, MaintenanceNotice, OpsNotice, Payment, Session, Setting, User, utcnow
 from .provider import ProviderError
-from .operations import reconcile_inbox, schedule_daily_report, send_notices
+from .operations import reconcile_inbox, schedule_daily_report, schedule_risk_alert, send_notices
 from .service_ui import app_label_html
 from .textverified_webhooks import prune_old_receipts
 
@@ -50,14 +50,10 @@ class Worker:
             except Exception:
                 log.exception('Polling failed for order %s', aid)
         await self.deliver_maintenance_notices()
-        await send_notices(Session, self.shop)
         if self._loops % 6 == 0:
             await self.poll_payments()
-            await reconcile_inbox(Session, self.shop)
         if self._loops % 12 == 0:
             await self.fix_orphan_orders()
-            await schedule_daily_report(Session)
-            await self.low_balance_alert()
         if self._loops % 720 == 0:
             await self.cleanup()
 
@@ -96,6 +92,23 @@ class Worker:
                     row.attempts += 1
                     row.next_attempt_at = utcnow() + timedelta(minutes=1)
             await asyncio.sleep(.06)
+
+    async def run_operations(self):
+        last_periodic = -1000.0
+        while True:
+            try:
+                await send_notices(Session, self.shop)
+                if time.monotonic() - last_periodic >= 60:
+                    last_periodic = time.monotonic()
+                    await asyncio.gather(reconcile_inbox(Session, self.shop),
+                                         schedule_daily_report(Session),
+                                         schedule_risk_alert(Session),
+                                         self.low_balance_alert())
+            except asyncio.CancelledError:
+                raise
+            except Exception:
+                log.exception('Operations worker iteration failed')
+            await asyncio.sleep(5)
 
     async def run_health_monitor(self):
         # Independent of SMS polling. Start a fresh check every minute while online.
@@ -333,13 +346,15 @@ class Worker:
         cutoff = utcnow() - timedelta(days=1)
         async with Session.begin() as s:
             rows = (await s.scalars(select(Activation).where(
-                Activation.completed_at < cutoff,
-                Activation.status == 'completed',
-                Activation.code.is_not(None)).limit(1000))).all()
+                func.coalesce(Activation.completed_at, Activation.created_at) < cutoff,
+                Activation.status.in_(('completed', 'cancelled', 'expired', 'failed')),
+                or_(Activation.code.is_not(None), Activation.phone.is_not(None))).limit(1000))).all()
             for row in rows:
                 row.code = None
                 row.phone = None
         async with Session.begin() as s:
+            await s.execute(delete(OpsNotice).where(OpsNotice.status.in_(('sent', 'failed')),
+                            OpsNotice.created_at < utcnow() - timedelta(days=30)))
             await s.execute(delete(MaintenanceNotice).where(
                 MaintenanceNotice.status != 'pending',
                 MaintenanceNotice.created_at < utcnow() - timedelta(days=7)))
