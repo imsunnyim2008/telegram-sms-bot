@@ -1887,9 +1887,21 @@ async def bank_input(message,uid,flow,raw):
     try:
         action=flow.get('action')
         if action=='config':
-            await bank.update_config(Session,uid,flow['field'],raw)
+            field = flow['field']
+            await bank.update_config(Session,uid,field,raw)
+            cfg = await bank.config(Session)
+            next_field = next((key for key in ('name', 'account', 'rate') if not cfg.get(key)), None)
+            if next_field:
+                await save_flow(uid, {'type':'bank_input','action':'config','field':next_field})
+                prompt = {'name':'Enter bank account name.',
+                          'account':'Enter your 10-digit Moniepoint account number.',
+                          'rate':'Enter the exchange rate in NGN per USD.'}[next_field]
+                return await show_selection_menu(message, '✅ Saved. Next: ' + prompt,
+                    keyboard([[('Cancel / Bank settings','ui:bankadmin')]]))
             await clear_flow(uid)
-            return await message.answer('Saved. Open Admin → Bank transfers to view or enable.')
+            return await show_selection_menu(message, '✅ Bank details saved. Review them and tap Enable to start accepting transfers.',
+                keyboard([[('Review bank settings','ui:bankadmin')],
+                          [('Enable bank transfers','ui:banktoggle:on')]]))
         if not await private_customer(message):
             return
         cfg=await bank.config(Session)
