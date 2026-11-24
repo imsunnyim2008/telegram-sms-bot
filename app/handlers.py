@@ -298,6 +298,8 @@ async def callbacks(callback: CallbackQuery):
             )
             # Keep the new order receipt; remove the stale confirm-purchase card.
             await remove_previous_menu(callback.message)
+        elif data.startswith('done:'):
+            await mark_customer_done(callback.message, uid, int(data.split(':')[1]))
         elif data.startswith('check:'):
             await check_sms(callback.message, uid, int(data.split(':')[1]), edit=True)
         elif data.startswith('cancel:'):
@@ -666,11 +668,16 @@ async def balance_command(message: Message):
 
 async def check_sms(target, user_id: int, activation_id: int, *, edit: bool = False) -> None:
     """Owner-only SMS lookup; inline refresh edits the receipt instead of spamming chat."""
-    async def respond(text: str, *, active: bool = False) -> None:
+    async def respond(text: str, *, active: bool = False, confirm: bool = False) -> None:
         if not edit:
-            await send_branded_message(target, text)
+            if confirm:
+                await send_branded_message(target, text, reply_markup=keyboard([[('✅ Verification Done', f'done:{activation_id}')]]))
+            else:
+                await send_branded_message(target, text)
             return
         rows = []
+        if confirm:
+            rows.append([('✅ Verification Done', f'done:{activation_id}')])
         if active:
             rows += [[('🔄 Check SMS now', f'check:{activation_id}')],
                      [('❌ Cancel order', f'cancel:{activation_id}')]]
@@ -714,7 +721,7 @@ async def check_sms(target, user_id: int, activation_id: int, *, edit: bool = Fa
     if code and status in ('received', 'completed'):
         await respond(f'🔐 Code for order #{activation_id}: {escape(code)}\n'
                       f'App: {app_label_html(service)}\nStatus: {escape(status)}'
-                      + (f'\nNumber: {escape(str(phone))}' if phone else ''))
+                      + (f'\nNumber: {escape(str(phone))}' if phone else ''), confirm=True)
     elif status == 'pending':
         await respond(
             f'Order #{activation_id}\nApp: {app_label_html(service)}\n'
@@ -1206,7 +1213,10 @@ async def customer_done(message: Message):
     parts = message.text.split()
     if len(parts) != 2 or not parts[1].isdigit() or len(parts[1]) > 9:
         return await message.answer('Use /done ORDER_ID after you finish your verification.')
-    aid, uid = int(parts[1]), message.from_user.id
+    await mark_customer_done(message, message.from_user.id, int(parts[1]))
+
+
+async def mark_customer_done(message, uid: int, aid: int):
     async with Session.begin() as s:
         row = await s.get(Activation, aid, with_for_update=True)
         if row is None or row.user_id != uid:
