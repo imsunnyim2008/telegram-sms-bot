@@ -193,6 +193,43 @@ async def candidates(session, claim_id):
         return list(unique.values())
 
 
+async def notify_name_matches(session, event_data):
+    """Wake a pending name claim when its authenticated bank event arrives.
+
+    Matching a name, amount and time does not establish incoming settlement.
+    Do not issue a wallet credit from this function.
+    """
+    sender_key = event_data.get('sender_key')
+    occurred_at = event_data.get('occurred_at')
+    if (not sender_key or not occurred_at or event_data['event_type'] not in ELIGIBLE
+            or event_data['transaction_status'] != 'COMPLETED'
+            or event_data['response_code'] != '20000'):
+        return
+    async with session() as s:
+        claims = (await s.scalars(select(BankDeposit).where(
+            BankDeposit.status == 'pending', BankDeposit.method == 'name',
+            BankDeposit.match_key == sender_key,
+            BankDeposit.amount_kobo == event_data['amount_kobo'],
+            BankDeposit.created_at >= occurred_at - timedelta(days=1),
+            BankDeposit.created_at <= occurred_at + timedelta(seconds=30)).limit(2))).all()
+    # Never signal a unique match when competing customer claims exist.
+    if len(claims) != 1:
+        return
+    claim = claims[0]
+    matches = await candidates(session, claim.id)
+    if len(matches) != 1 or matches[0].transaction_key != event_data['transaction_key']:
+        return
+    async with session.begin() as s:
+        current = await s.get(BankDeposit, claim.id, with_for_update=True)
+        if not current or current.status != 'pending':
+            return
+        await notice(s, f'bankmatched:{claim.id}', claim.user_id,
+                     f'✅ Deposit #{claim.id}: matching bank transaction found. Awaiting incoming settlement confirmation. No need to transfer again.')
+        for admin in settings.admins:
+            await notice(s, f'bankmatchedadmin:{claim.id}:{admin}', admin,
+                         f'Bank deposit #{claim.id} matched by name, amount and bank transaction time. Confirm actual incoming settlement in Moniepoint before crediting.')
+
+
 async def approve(session, actor, claim_id, event_key):
     if actor not in settings.admins:
         raise ValueError('Admin only')
