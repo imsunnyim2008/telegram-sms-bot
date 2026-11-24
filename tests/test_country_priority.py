@@ -50,6 +50,7 @@ def test_out_of_stock_favorites_are_visible_but_not_purchasable():
 
 class FakeMessage:
     def __init__(self):
+        self.chat = SimpleNamespace(id=123, type='private')
         self.calls = []
 
     async def answer(self, text, **kwargs):

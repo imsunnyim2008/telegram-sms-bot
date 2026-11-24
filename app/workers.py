@@ -122,7 +122,8 @@ class Worker:
                 await self.shop.notifier.send(
                     user_id,
                     f'🔐 Your verification code for order #{aid}: {escape(str(code))}\n'
-                    f'App: {app_label_html(service)}',
+                    f'App: {app_label_html(service)}\n'
+                    f'After using the code, confirm with /done {aid}.',
                     parse_mode='HTML',
                 )
             except Exception:
@@ -173,10 +174,11 @@ class Worker:
                 log.warning('Payment status check failed for a pending invoice')
 
     async def cleanup(self):
-        cutoff = utcnow() - timedelta(days=30)
+        cutoff = utcnow() - timedelta(days=1)
         async with Session.begin() as s:
             rows = (await s.scalars(select(Activation).where(
-                Activation.created_at < cutoff,
+                Activation.completed_at < cutoff,
+                Activation.status == 'completed',
                 Activation.code.is_not(None)).limit(1000))).all()
             for row in rows:
                 row.code = None

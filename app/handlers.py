@@ -1,7 +1,9 @@
 """Inline-keyboard Telegram UI. No financial operations live inside callbacks."""
 import asyncio
 import json
+import logging
 import time
+from datetime import timezone
 from decimal import Decimal, InvalidOperation
 from html import escape
 
@@ -15,11 +17,12 @@ from .business import BotError
 from .config import settings
 from .country_ui import arrange_country_offers, country_flag
 from .command_menu import PUBLIC_HELP, ADMIN_HELP
-from .db import Activation, Session, Setting, User
+from .db import Activation, LedgerEntry, Session, Setting, User, utcnow
 from .ledger import InsufficientFunds, apply
 from .service_ui import (app_label_html, custom_emoji_unavailable,
                          without_custom_emoji)
 
+log = logging.getLogger(__name__)
 router = Router()
 shop = None  # assigned by app.main on startup
 
@@ -165,6 +168,8 @@ async def track_menu(message, sent) -> None:
 @router.message.middleware()
 async def tidy_before_command(handler, event, data):
     """Blue Telegram Menu commands also retire the previous visible card."""
+    if getattr(getattr(event, 'chat', None), 'type', None) != 'private':
+        return
     if (getattr(event, 'text', '') or '').startswith('/'):
         await discard_active_menu(event)
     return await handler(event, data)
@@ -234,6 +239,9 @@ async def callbacks(callback: CallbackQuery):
     # Answer immediately; lengthy provider calls happen AFTER Telegram acknowledgement.
     uid = callback.from_user.id
     data = callback.data or ''
+    if getattr(getattr(callback.message, 'chat', None), 'type', None) != 'private':
+        await callback.answer('Open Friday in a private chat.', show_alert=True)
+        return
     if data.startswith('unavailable:'):
         await callback.answer('No numbers in stock for this country and service.', show_alert=True)
         return
@@ -285,6 +293,8 @@ async def callbacks(callback: CallbackQuery):
             )
             # Keep the new order receipt; remove the stale confirm-purchase card.
             await remove_previous_menu(callback.message)
+        elif data.startswith('done:'):
+            await mark_customer_done(callback.message, uid, int(data.split(':')[1]))
         elif data.startswith('check:'):
             await check_sms(callback.message, uid, int(data.split(':')[1]), edit=True)
         elif data.startswith('cancel:'):
@@ -357,7 +367,8 @@ ProviderErrorMessage = BotError
 async def services(target, page: int = 0, *, edit: bool = False):
     try:
         items = await shop.provider.get_prices()
-    except Exception:
+    except Exception as exc:
+        log.warning('Price lookup failed: %s', type(exc).__name__)
         await target.answer('Live prices are temporarily unavailable.')
         return
     available = {x.service for x in items}
@@ -652,11 +663,16 @@ async def balance_command(message: Message):
 
 async def check_sms(target, user_id: int, activation_id: int, *, edit: bool = False) -> None:
     """Owner-only SMS lookup; inline refresh edits the receipt instead of spamming chat."""
-    async def respond(text: str, *, active: bool = False) -> None:
+    async def respond(text: str, *, active: bool = False, confirm: bool = False) -> None:
         if not edit:
-            await send_branded_message(target, text)
+            if confirm:
+                await send_branded_message(target, text, reply_markup=keyboard([[('✅ Verification Done', f'done:{activation_id}')]]))
+            else:
+                await send_branded_message(target, text)
             return
         rows = []
+        if confirm:
+            rows.append([('✅ Verification Done', f'done:{activation_id}')])
         if active:
             rows += [[('🔄 Check SMS now', f'check:{activation_id}')],
                      [('❌ Cancel order', f'cancel:{activation_id}')]]
@@ -693,17 +709,19 @@ async def check_sms(target, user_id: int, activation_id: int, *, edit: bool = Fa
             await respond('Order not found.')
             return
         status = row.status
+        expires = row.expires_at
         code = row.code
         phone = row.phone
         service = row.service
     if code and status in ('received', 'completed'):
         await respond(f'🔐 Code for order #{activation_id}: {escape(code)}\n'
                       f'App: {app_label_html(service)}\nStatus: {escape(status)}'
-                      + (f'\nNumber: {escape(str(phone))}' if phone else ''))
+                      + (f'\nNumber: {escape(str(phone))}' if phone else ''), confirm=True)
     elif status == 'pending':
         await respond(
             f'Order #{activation_id}\nApp: {app_label_html(service)}\n'
             f'Number: {escape(str(phone or "not assigned"))}\n'
+            f'Time remaining: {remaining_time(expires)}.\n'
             'Waiting for an SMS at the provider. '
             'If the sender has not sent a code, Friday cannot create one. '
             'Use Check SMS to refresh, or cancel a pending order if unused.',
@@ -1102,6 +1120,226 @@ async def clear_chat_confirm(target, uid: int):
             'could not be removed. For the entire chat, use Telegram > Clear History.'
         )
     # If all delete requests succeeded, leave the chat empty.
+
+
+
+def remaining_time(expires):
+    if expires.tzinfo is None:
+        expires = expires.replace(tzinfo=timezone.utc)
+    seconds = max(0, int((expires - utcnow()).total_seconds()))
+    return f'{seconds // 60}m {seconds % 60}s'
+
+
+async def private_customer(message):
+    return (message.chat.type == 'private' and
+            await allowed(message.from_user.id, message))
+
+
+async def private_admin(message):
+    if message.chat.type != 'private' or not admin_only(message):
+        await message.answer('Admin only in private chat.')
+        return False
+    return True
+
+
+@router.message(Command('history', 'refunds'))
+async def transaction_history(message: Message):
+    if not await private_customer(message):
+        return
+    uid = message.from_user.id
+    refunds = message.text.split()[0].split('@')[0].lower() == '/refunds'
+    async with Session() as s:
+        query = select(LedgerEntry).where(LedgerEntry.user_id == uid)
+        if refunds:
+            query = query.where(LedgerEntry.type == 'refund')
+        rows = (await s.scalars(query.order_by(LedgerEntry.id.desc()).limit(15))).all()
+    lines = ['Confirmed refunds' if refunds else 'Recent wallet transactions']
+    for row in rows:
+        lines.append(f'#{row.id} • {row.created_at:%Y-%m-%d} • {row.type} '
+                     f'{row.amount:+.4f} {settings.wallet_currency}')
+    if not rows:
+        lines.append('No recorded transactions.')
+    if refunds:
+        lines.append('Pending cancellations are not refunds until confirmed. See /orders.')
+    await message.answer('\n'.join(lines))
+
+
+@router.message(Command('receipt'))
+async def order_receipt(message: Message):
+    if not await private_customer(message):
+        return
+    parts = message.text.split()
+    if len(parts) != 2 or not parts[1].isdigit() or len(parts[1]) > 9:
+        return await message.answer('Use /receipt ORDER_ID (see /orders).')
+    async with Session() as s:
+        row = await s.get(Activation, int(parts[1]))
+        if row is None or row.user_id != message.from_user.id:
+            return await message.answer('Order not found.')
+    from aiogram.types import BufferedInputFile
+    body = (f'FRIDAY order record #{row.id}\n'
+            f'Service: {row.service}\nStatus: {row.status}\n'
+            f'Created: {row.created_at:%Y-%m-%d %H:%M} UTC\n'
+            f'Original charge: {row.price_charged} {settings.wallet_currency}\n'
+            'For confirmed refunds see /refunds. This is an order record, not a tax invoice.\n')
+    await message.answer_document(BufferedInputFile(body.encode(), filename=f'order-{row.id}.txt'))
+
+
+@router.message(Command('account'))
+async def customer_account(message: Message):
+    if not await private_customer(message):
+        return
+    uid = message.from_user.id
+    async with Session() as s:
+        user = await s.get(User, uid)
+        counts = (await s.execute(select(Activation.status, func.count())
+                                  .where(Activation.user_id == uid)
+                                  .group_by(Activation.status))).all()
+    if user is None:
+        return
+    await message.answer(f'Your account\nBalance: {user.balance} {settings.wallet_currency}\n'
+                         + '\n'.join(f'{state}: {count}' for state, count in counts)
+                         + '\nUse /history for wallet activity.')
+
+
+@router.message(Command('done'))
+async def customer_done(message: Message):
+    if not await private_customer(message):
+        return
+    parts = message.text.split()
+    if len(parts) != 2 or not parts[1].isdigit() or len(parts[1]) > 9:
+        return await message.answer('Use /done ORDER_ID after you finish your verification.')
+    await mark_customer_done(message, message.from_user.id, int(parts[1]))
+
+
+async def mark_customer_done(message, uid: int, aid: int):
+    async with Session.begin() as s:
+        row = await s.get(Activation, aid, with_for_update=True)
+        if row is None or row.user_id != uid:
+            return await message.answer('Order not found.')
+        if row.status not in ('received', 'completed') or not row.sms_notified:
+            return await message.answer('No delivered SMS recorded for this order.')
+        key = f'customer_done:{aid}'
+        if await s.get(Setting, key) is None:
+            s.add(Setting(key=key, value=utcnow().isoformat()))
+    await message.answer(f'✅ Order #{aid}: verification marked done by you. '
+                         'This is a customer confirmation, not confirmation from the destination app.')
+
+
+@router.message(Command('support'))
+async def customer_support(message: Message):
+    if not await private_customer(message):
+        return
+    parts = message.text.split()
+    if len(parts) != 2 or not parts[1].isdigit() or len(parts[1]) > 9:
+        return await message.answer('Use /support ORDER_ID to request a review. Never send codes or passwords.')
+    aid, uid = int(parts[1]), message.from_user.id
+    created = False
+    async with Session.begin() as s:
+        row = await s.get(Activation, aid, with_for_update=True)
+        if row is None or row.user_id != uid:
+            return await message.answer('Order not found.')
+        key = f'support_order:{aid}'
+        if await s.get(Setting, key) is None:
+            s.add(Setting(key=key, value=utcnow().isoformat()))
+            created = True
+    if created:
+        try:
+            await shop.alert_admins(f'Customer requested support review for order #{aid}. Use /tickets.')
+        except Exception:
+            log.warning('Support notification failed; ticket remains stored.')
+    await message.answer(f'Support request for order #{aid} recorded. Do not share your verification code.')
+
+
+@router.message(Command('tickets'))
+async def admin_tickets(message: Message):
+    if not await private_admin(message):
+        return
+    async with Session() as s:
+        rows = (await s.scalars(select(Setting).where(Setting.key.startswith('support_order:'))
+                                .order_by(Setting.value.desc()).limit(30))).all()
+    await message.answer('Support queue\n' + ('\n'.join(
+        f'Order #{row.key.split(":")[1]} • {row.value}' for row in rows) or 'No open tickets.'))
+
+
+@router.message(Command('closeticket'))
+async def admin_close_ticket(message: Message):
+    if not await private_admin(message):
+        return
+    parts = message.text.split()
+    if len(parts) != 2 or not parts[1].isdigit() or len(parts[1]) > 9:
+        return await message.answer('Use /closeticket ORDER_ID after resolving the issue.')
+    async with Session.begin() as s:
+        order = await s.get(Activation, int(parts[1]), with_for_update=True)
+        ticket = await s.get(Setting, f'support_order:{int(parts[1])}')
+        if order is None or ticket is None:
+            return await message.answer('Ticket not found.')
+        await s.delete(ticket)
+        uid = order.user_id
+    try:
+        await shop.notifier.send(uid, f'Support review for order #{parts[1]} was closed. Use /orders for its status.')
+    except Exception:
+        log.warning('Support closure notification failed.')
+    await message.answer('Support ticket closed. No wallet or order state was changed.')
+
+
+@router.message(Command('maintenance'))
+async def admin_maintenance(message: Message):
+    if not await private_admin(message):
+        return
+    parts = message.text.lower().split()
+    if len(parts) != 2 or parts[1] not in ('on', 'off'):
+        async with Session() as s:
+            row = await s.get(Setting, 'purchase_maintenance')
+        return await message.answer('Purchase maintenance: ' + (row.value if row else 'off')
+                                    + '\nUse /maintenance on or /maintenance off.')
+    async with Session.begin() as s:
+        row = await s.get(Setting, 'purchase_maintenance', with_for_update=True)
+        if row:
+            row.value = parts[1]
+        else:
+            s.add(Setting(key='purchase_maintenance', value=parts[1]))
+    await message.answer('Purchase maintenance: ' + parts[1]
+                         + '. Existing orders and refunds remain unaffected.')
+
+
+@router.message(Command('dailyreport'))
+async def admin_dailyreport(message: Message):
+    if not await private_admin(message):
+        return
+    start = utcnow().replace(hour=0, minute=0, second=0, microsecond=0)
+    async with Session() as s:
+        orders = (await s.execute(select(Activation.status, func.count())
+                                  .where(Activation.created_at >= start)
+                                  .group_by(Activation.status))).all()
+        ledger = (await s.execute(select(LedgerEntry.type, func.sum(LedgerEntry.amount))
+                                  .where(LedgerEntry.created_at >= start)
+                                  .group_by(LedgerEntry.type))).all()
+    await message.answer(f'Daily report (UTC) {start:%Y-%m-%d}\nOrders created today:\n'
+                         + ('\n'.join(f'{state}: {count}' for state, count in orders) or 'None')
+                         + '\nWallet activity today:\n'
+                         + ('\n'.join(f'{kind}: {amount:+.4f} {settings.wallet_currency}'
+                                      for kind, amount in ledger) or 'None')
+                         + '\nWallet flows are not net profit.')
+
+
+@router.message(Command('customer'))
+async def admin_customer(message: Message):
+    if not await private_admin(message):
+        return
+    parts = message.text.split()
+    if len(parts) != 2 or not parts[1].isdigit() or len(parts[1]) > 16:
+        return await message.answer('Use /customer TELEGRAM_USER_ID.')
+    uid = int(parts[1])
+    async with Session() as s:
+        user = await s.get(User, uid)
+        count = await s.scalar(select(func.count()).select_from(Activation)
+                               .where(Activation.user_id == uid))
+    if user is None:
+        return await message.answer('Customer not found.')
+    await message.answer(f'Customer {uid}\nOrders: {count}\n'
+                         f'Balance: {user.balance} {settings.wallet_currency}\n'
+                         f'Restricted: {"Yes" if user.is_banned else "No"}\n'
+                         'Use /ban or /unban only after review.')
 
 
 @router.message(F.text)
