@@ -6,13 +6,15 @@ import json
 import os
 import re
 from decimal import Decimal
+from datetime import datetime, timezone
+from zoneinfo import ZoneInfo
 
 from sqlalchemy import select
 from sqlalchemy.dialects.postgresql import insert as pg_insert
 from sqlalchemy.dialects.sqlite import insert as sqlite_insert
 
 from .config import settings
-from .db import BankDeposit, BankEventAlias, BankEventMatch, MoniepointEvent, utcnow
+from .db import BankDeposit, BankEventAlias, BankEventMatch, BankEventTime, MoniepointEvent, utcnow
 from .operations import notice
 
 TRANSFER_EVENTS = {'V1_TRANSFER_TRANSACTION', 'V1_POS_TRANSFER_TRANSACTION'}
@@ -58,6 +60,22 @@ def event_aliases(data, meta):
     return sorted(aliases)
 
 
+def transaction_time(raw):
+    if not isinstance(raw, str) or len(raw) > 80:
+        return None
+    try:
+        value = datetime.fromisoformat(raw.replace('Z', '+00:00'))
+        if value.tzinfo is None:
+            return None
+    except ValueError:
+        try:
+            # Documented local POS timestamp format; Nigeria business time.
+            value = datetime.strptime(raw, '%Y/%m/%d %H:%M:%S').replace(tzinfo=ZoneInfo('Africa/Lagos'))
+        except ValueError:
+            return None
+    return value.astimezone(timezone.utc)
+
+
 def parse_transfer(body):
     event = json.loads(body)
     if not isinstance(event, dict):
@@ -92,6 +110,7 @@ def parse_transfer(body):
     rrn = data.get('retrievalReferenceNumber')
     return {
         'aliases': event_aliases(data, meta),
+        'occurred_at': transaction_time(data.get('transactionTime')),
         'sender_key': identity_key(sender) if isinstance(sender, str) and sender.strip() and webhook_secret() else None,
         'rrn_key': identity_key(rrn) if isinstance(rrn, str) and rrn.strip() and webhook_secret() else None,
         'event_type': kind, 'transaction_key': hashlib.sha256(ref.encode()).hexdigest(),
@@ -107,6 +126,7 @@ async def record_transfer(session, webhook_id, data):
     key = hashlib.sha256(webhook_id.encode()).hexdigest()
     data = dict(data)
     aliases = data.pop('aliases', [])
+    occurred_at = data.pop('occurred_at', None)
     match = {k: data.pop(k, None) for k in ('sender_key', 'rrn_key')}
     async with session.begin() as s:
         factory = pg_insert if s.bind.dialect.name == 'postgresql' else sqlite_insert
@@ -116,6 +136,9 @@ async def record_transfer(session, webhook_id, data):
         if result.scalar_one_or_none() is None:
             return False
         await s.execute(factory(BankEventMatch).values(event_key=key, **match).on_conflict_do_nothing(index_elements=['event_key']))
+        if occurred_at is not None:
+            await s.execute(factory(BankEventTime).values(event_key=key, occurred_at=occurred_at)
+                            .on_conflict_do_nothing())
         for kind, digest in aliases:
             await s.execute(factory(BankEventAlias).values(event_key=key, kind=kind, digest=digest)
                             .on_conflict_do_nothing())

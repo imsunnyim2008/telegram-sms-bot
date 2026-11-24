@@ -11,7 +11,7 @@ from html import escape
 from aiogram import F, Router
 from aiogram.exceptions import TelegramBadRequest
 from aiogram.filters import Command, CommandStart
-from aiogram.types import CallbackQuery, InlineKeyboardButton, InlineKeyboardMarkup, Message
+from aiogram.types import CallbackQuery, CopyTextButton, InlineKeyboardButton, InlineKeyboardMarkup, Message
 from sqlalchemy import String, cast, func, select
 
 from .business import BotError
@@ -1823,12 +1823,10 @@ async def bank_button(target, uid, parts):
             if q['nonce'] != parts[2] or q['expires'] < time.time():
                 await target.answer('Quote expired. Open Bank transfer again.')
             else:
-                await save_flow(uid, {'type': 'bank_input', 'action': 'claim', 'method': parts[1], **q})
+                await save_flow(uid, {**q, 'type': 'bank_input', 'action': 'claim', 'method': 'name'})
                 await show_selection_menu(target,
-                    {'id': 'Enter the transaction number or transaction reference from your receipt.',
-                     'session': 'Enter the 30-digit Session ID from your receipt.',
-                     'name': 'Enter the full sender name as shown on the transfer. Name matching requires review.'}[parts[1]],
-                    keyboard([[('Cancel', 'ui:opcancel')]]), edit=True)
+                    '✅ Payment verification\n\nEnter the full name on the bank account you used to send the money.\n\nFriday will check your name, amount and transaction time.',
+                    keyboard([[('⬅️ Cancel', 'ui:opcancel')]]), edit=True)
     elif name == 'bankclaims':
         async with Session() as s:
             rows = (await s.scalars(select(BankDeposit).where(BankDeposit.user_id == uid)
@@ -1926,24 +1924,26 @@ async def bank_input(message,uid,flow,raw):
             return await show_selection_menu(message,
                 f'🏦 Bank Transfer Details\n\nBank: Moniepoint\nAccount name: {cfg["name"]}\nAccount number: {cfg["account"]}\n'
                 f'Amount to transfer: ₦{Decimal(kobo)/100:,.2f}\nRate: ₦{Decimal(cfg["rate"]):,.2f} / USD\n\n'
-                f'Your unique transfer remark (copy exactly):\n{remark}\n\n'
-                f'Claim #{claim}. Friday checks signed bank events for the exact remark and amount. '
-                'If the remark is missing, use a receipt identifier below. Settlement review is required. Never send an OTP or bank password.',
-                keyboard([[('Check deposit status','ui:bankclaims')],
-                          [('Transaction no. / reference',f'ui:bankmethod:id:{q["nonce"]}')],
-                          [('Session ID',f'ui:bankmethod:session:{q["nonce"]}')],
-                          [('Sender full name',f'ui:bankmethod:name:{q["nonce"]}')],
-                          [('Cancel','ui:opcancel')]]))
+                f'Payment reference: #{claim}\nOptional transfer remark: {remark}\n\n'
+                'After sending the exact amount, tap I Have Paid and enter the full sender name.',
+                InlineKeyboardMarkup(inline_keyboard=[
+                    [InlineKeyboardButton(text='📋 Copy account number', copy_text=CopyTextButton(text=cfg['account']))],
+                    [InlineKeyboardButton(text='📋 Copy transfer remark', copy_text=CopyTextButton(text=remark))],
+                    [InlineKeyboardButton(text='✅ I Have Paid', callback_data=f'ui:bankmethod:name:{q["nonce"]}')],
+                    [InlineKeyboardButton(text='⬅️ Cancel', callback_data='ui:opcancel')]
+                ]))
         if action=='claim':
             if flow['expires']<time.time() or cfg['account']!=flow['account'] or cfg['name']!=flow['name']:
                 raise ValueError('Bank details or quote changed. Open a new quote and contact support if already paid.')
-            cid=await bank.create_claim(Session,uid,flow['kobo'],flow['rate'],flow['method'],raw, existing_quote=True)
+            if not flow.get('remark_claim'):
+                raise ValueError('Open your bank deposit request again.')
+            cid = await bank.submit_sender_name(Session, uid, flow['remark_claim'], raw)
             await clear_flow(uid)
             matches=await bank.candidates(Session,cid)
-            return await message.answer(f'Claim #{cid} recorded. '
-                + ('Authenticated matching event found. Awaiting settlement review.' if len(matches)==1 else
-                   'No unique authenticated event yet. Awaiting review; do not transfer again.'),
-                reply_markup=keyboard([[('My bank claims','ui:bankclaims')]]))
+            return await message.answer(f'🏦 Deposit #{cid}\n\n'
+                + ('✅ Matching bank transaction found. Awaiting settlement confirmation.' if len(matches)==1 else
+                   '⏳ Verification pending. No unique matching bank transaction yet. Please do not transfer again.'),
+                reply_markup=keyboard([[('🔄 Check deposit status','ui:bankclaims')]]))
     except ValueError as exc:
         await message.answer(str(exc))
 
