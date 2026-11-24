@@ -1760,6 +1760,7 @@ async def bank_admin_card(target, edit=True):
         f'Account name: {cfg.get("name", "not set")}\n'
         f'Account number: {cfg.get("account", "not set")}\n'
         f'NGN per USD: {cfg.get("rate", "not set")}\n'
+        f'Minimum bank deposit: ₦{bank.MIN_NAIRA:,}\n'
         f'Customer deposits: {"enabled" if bank.ready(cfg) else "disabled"}\n'
         'Authenticated event matching + administrator confirmation of settled incoming payment.',
         keyboard([[('Set account name', 'ui:bankset:name'), ('Set account number', 'ui:bankset:account')],
@@ -1806,9 +1807,11 @@ async def bank_button(target, uid, parts):
         else:
             await save_flow(uid, {'type': 'bank_input', 'action': 'amount'})
             await show_selection_menu(target,
-                f'🏦 Moniepoint bank transfer\nEnter any positive amount in naira (up to two decimal places).\n'
-                f'Exchange rate: NGN {cfg["rate"]} per USD.\nNo $5 minimum for bank transfers.',
-                keyboard([[('Cancel', 'ui:opcancel')]]), edit=True)
+                f'🏦 Bank Transfer — Nigeria\n\n'
+                f'Bank: Moniepoint\nMinimum deposit: ₦{bank.MIN_NAIRA:,}\n'
+                f'Exchange rate: ₦{Decimal(cfg["rate"]):,.2f} = $1 USD\n\n'
+                'Enter your deposit amount in naira to continue.',
+                keyboard([[('⬅️ Back to payment methods', 'topup')]]), edit=True)
     elif name == 'bankmethod' and len(parts) == 3 and parts[1] in ('id', 'name', 'session'):
         # The quote is persisted separately from button flow, which is cleared on navigation.
         async with Session() as s:
@@ -1921,8 +1924,8 @@ async def bank_input(message,uid,flow,raw):
                     s.add(Setting(key=f'bankquote:{uid}',value=json.dumps(q)))
             await clear_flow(uid)
             return await show_selection_menu(message,
-                f'🇳🇬 Transfer to Moniepoint\nAccount name: {cfg["name"]}\nAccount number: {cfg["account"]}\n'
-                f'Amount: NGN {Decimal(kobo)/100:.2f}\nRate: NGN {cfg["rate"]}/USD\n'
+                f'🏦 Bank Transfer Details\n\nBank: Moniepoint\nAccount name: {cfg["name"]}\nAccount number: {cfg["account"]}\n'
+                f'Amount to transfer: ₦{Decimal(kobo)/100:,.2f}\nRate: ₦{Decimal(cfg["rate"]):,.2f} / USD\n\n'
                 f'Your unique transfer remark (copy exactly):\n{remark}\n\n'
                 f'Claim #{claim}. Friday checks signed bank events for the exact remark and amount. '
                 'If the remark is missing, use a receipt identifier below. Settlement review is required. Never send an OTP or bank password.',
@@ -1934,7 +1937,7 @@ async def bank_input(message,uid,flow,raw):
         if action=='claim':
             if flow['expires']<time.time() or cfg['account']!=flow['account'] or cfg['name']!=flow['name']:
                 raise ValueError('Bank details or quote changed. Open a new quote and contact support if already paid.')
-            cid=await bank.create_claim(Session,uid,flow['kobo'],flow['rate'],flow['method'],raw)
+            cid=await bank.create_claim(Session,uid,flow['kobo'],flow['rate'],flow['method'],raw, existing_quote=True)
             await clear_flow(uid)
             matches=await bank.candidates(Session,cid)
             return await message.answer(f'Claim #{cid} recorded. '
