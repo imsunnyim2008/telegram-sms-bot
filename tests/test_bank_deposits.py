@@ -183,3 +183,42 @@ async def test_customer_bank_flow_has_copy_buttons_and_one_verification_method(s
     async with session() as s:
         rows = (await s.scalars(select(BankDeposit))).all()
         assert len(rows) == 1 and rows[0].method == 'name'
+
+
+@pytest.mark.asyncio
+async def test_late_bank_event_notifies_unique_claim_once_without_credit(setup_database, monkeypatch):
+    from app.db import OpsNotice, utcnow
+    session, _, _ = setup_database
+    await configure(session, monkeypatch)
+    cid = await bank.create_claim(session, 99, 65000, '1500', 'remark', bank.new_remark())
+    await bank.submit_sender_name(session, 99, cid, 'Test Sender')
+    data = parse_transfer(json.dumps({'eventType':'V1_TRANSFER_TRANSACTION','data':{
+        'amount':65000,'transactionReference':'late-ref','transactionStatus':'COMPLETED',
+        'responseCode':'20000','transactionTime':utcnow().isoformat(),
+        'metaData':{'customerName':'TEST SENDER'}}}).encode())
+    await record_transfer(session, 'late-event', data)
+    await bank.notify_name_matches(session, data)
+    await bank.notify_name_matches(session, data)
+    async with session() as s:
+        messages = (await s.scalars(select(OpsNotice).where(OpsNotice.key == f'bankmatched:{cid}'))).all()
+        assert len(messages) == 1 and messages[0].recipient == 99
+        assert (await s.get(User,99)).balance == Decimal('10.00')
+        assert (await s.get(BankDeposit,cid)).status == 'pending'
+
+
+@pytest.mark.asyncio
+async def test_competing_name_claims_do_not_notify_a_unique_match(setup_database, monkeypatch):
+    from app.db import OpsNotice, utcnow
+    session, _, _ = setup_database
+    await configure(session, monkeypatch)
+    for uid in (99, ADMIN):
+        cid = await bank.create_claim(session, uid, 65000, '1500', 'remark', bank.new_remark())
+        await bank.submit_sender_name(session, uid, cid, 'Test Sender')
+    data = parse_transfer(json.dumps({'eventType':'V1_TRANSFER_TRANSACTION','data':{
+        'amount':65000,'transactionReference':'ambiguous-ref','transactionStatus':'COMPLETED',
+        'responseCode':'20000','transactionTime':utcnow().isoformat(),
+        'metaData':{'customerName':'TEST SENDER'}}}).encode())
+    await record_transfer(session, 'ambiguous-event', data)
+    await bank.notify_name_matches(session, data)
+    async with session() as s:
+        assert not (await s.scalars(select(OpsNotice).where(OpsNotice.key.like('bankmatched:%')))).all()
