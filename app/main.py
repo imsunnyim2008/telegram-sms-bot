@@ -27,6 +27,7 @@ from .textverified_webhooks import (valid_signature as valid_textverified_signat
                                     wake_matching_orders)
 from .workers import Worker
 from .operations import accept_finished_ipn
+from .moniepoint import webhook_secret, valid_signature as moniepoint_signature, parse_transfer, record_transfer
 from .service_ui import custom_emoji_unavailable, without_custom_emoji
 from sqlalchemy.exc import IntegrityError
 
@@ -291,3 +292,33 @@ async def nowpayments_webhook(request: Request, background: BackgroundTasks):
     await accept_finished_ipn(Session, payment_id, invoice_id, order_id)
     background.add_task(process_nowpayments_payment, order_id, invoice_id, payment_id)
     return {'ok': True}
+
+
+@web.post('/webhook/moniepoint')
+async def moniepoint_webhook(request: Request):
+    secret = webhook_secret()
+    if not secret:
+        raise HTTPException(status_code=503, detail='Moniepoint signing secret not configured')
+    body = bytearray()
+    async for chunk in request.stream():
+        body.extend(chunk)
+        if len(body) > 65536:
+            raise HTTPException(status_code=413, detail='Payload too large')
+    raw = bytes(body)
+    webhook_id = request.headers.get('moniepoint-webhook-id', '')
+    timestamp = request.headers.get('moniepoint-webhook-timestamp', '')
+    signature = request.headers.get('moniepoint-webhook-signature', '')
+    if not moniepoint_signature(raw, webhook_id, timestamp, signature, secret):
+        raise HTTPException(status_code=401, detail='Invalid signature')
+    try:
+        data = parse_transfer(raw)
+    except (ValueError, TypeError, UnicodeError):
+        raise HTTPException(status_code=400, detail='Invalid transaction event')
+    if data is not None:
+        await record_transfer(Session, webhook_id, data)
+    return {'ok': True}
+
+
+@web.get('/webhook/moniepoint')
+async def moniepoint_webhook_info():
+    return {'service': 'Moniepoint webhook pilot', 'method': 'POST', 'automatic_credit': False}

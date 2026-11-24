@@ -20,6 +20,7 @@ from .country_ui import arrange_country_offers, country_flag
 from .command_menu import PUBLIC_HELP, ADMIN_HELP
 from .db import Activation, AdminAudit, LedgerEntry, Payment, Session, Setting, SupportMessage, User, utcnow
 from .operations import LAGOS, STARTED_AT, audit, claim_purchase, notice, report, risk_summary
+from .moniepoint import pilot_status
 from .auto_maintenance import acknowledge, manual_mode
 from .ledger import InsufficientFunds, apply
 from .service_ui import (app_label_html, custom_emoji_unavailable,
@@ -73,7 +74,7 @@ def admin_settings_keyboard() -> InlineKeyboardMarkup:
         [('🗓 Reports', 'ui:reports'), ('🧪 System check', 'ui:testall')],
         [('🛡 Risk review', 'ui:risk'), ('📜 Admin activity', 'ui:audit')],
         [('🔍 Find customer', 'ui:searchcustomer'), ('💵 Low balance alert', 'ui:lowthreshold')],
-        [('📡 Health dashboard', 'ui:health')],
+        [('📡 Health dashboard', 'ui:health'), ('🏦 Moniepoint pilot', 'ui:moniepoint')],
         [('🔌 API setup check', 'ui:setupcheck'), ('👥 Customers', 'ui:customers')],
         [('🎧 Support tickets', 'ui:tickets'), ('💳 Reconcile payment', 'ui:reconcilepayment')],
         [('📣 Broadcast', 'ui:broadcast'), ('⚖️ Review orders', 'ui:review')],
@@ -1789,6 +1790,9 @@ async def operations_button(target, uid, parts):
         await save_flow(uid, {'type': 'ops_input', 'action': 'threshold'})
         await show_selection_menu(target, f'Current low balance alert: {threshold} provider units.\nEnter a new nonnegative threshold (USD for TextVerified).',
                                   keyboard([[('Cancel', 'ui:opcancel')]]), edit=True)
+    elif name == 'moniepoint':
+        await show_selection_menu(target, await pilot_status(Session),
+                                  keyboard([[('Refresh', 'ui:moniepoint'), ('⬅️ Admin Settings', 'admin:settings')]]), edit=True)
     elif name == 'health':
         async with Session() as s:
             row = await s.get(Setting, 'textverified_auto_state')

@@ -147,6 +147,20 @@ class OpsNotice(Base):
     next_attempt_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utcnow)
 
 
+class MoniepointEvent(Base):
+    """Minimal authenticated event metadata for an admin-only, non-crediting pilot."""
+    __tablename__ = 'moniepoint_events'
+    event_key: Mapped[str] = mapped_column(String(64), primary_key=True)
+    event_type: Mapped[str] = mapped_column(String(40))
+    transaction_key: Mapped[str] = mapped_column(String(64))
+    amount_kobo: Mapped[int] = mapped_column(BigInteger)
+    transaction_status: Mapped[str] = mapped_column(String(24))
+    response_code: Mapped[str] = mapped_column(String(12))
+    has_merchant_reference: Mapped[bool] = mapped_column(Boolean)
+    has_narration: Mapped[bool] = mapped_column(Boolean)
+    received_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utcnow)
+
+
 class Setting(Base):
     __tablename__ = 'settings'
     key: Mapped[str] = mapped_column(String(80), primary_key=True)
