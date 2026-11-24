@@ -133,3 +133,30 @@ async def test_new_claim_minimum_and_previous_quote(setup_database, monkeypatch)
     claim = await bank.create_claim(session, 99, 10000, '1500', 'id', 'old-reference', existing_quote=True)
     async with session() as s:
         assert (await s.get(BankDeposit, claim)).amount_kobo == 10000
+
+
+@pytest.mark.asyncio
+async def test_name_only_reuses_quote_and_checks_actual_bank_time(setup_database, monkeypatch):
+    from datetime import timedelta
+    from app.db import utcnow
+    session, _, _ = setup_database
+    await configure(session, monkeypatch)
+    cid = await bank.create_claim(session, 99, 50000, '1500', 'remark', bank.new_remark())
+    with pytest.raises(ValueError):
+        await bank.submit_sender_name(session, ADMIN, cid, 'Test Sender')
+    assert await bank.submit_sender_name(session, 99, cid, ' Test   Sender ') == cid
+    assert await bank.submit_sender_name(session, 99, cid, 'test sender') == cid
+    with pytest.raises(ValueError):
+        await bank.submit_sender_name(session, 99, cid, 'Different Person')
+    for ref, stamp in [('old', (utcnow()-timedelta(days=2)).isoformat()),
+                       ('missing', None), ('valid', utcnow().isoformat())]:
+        payload = {'eventType':'V1_TRANSFER_TRANSACTION','data':{
+            'amount':50000,'transactionReference':ref,'transactionStatus':'COMPLETED',
+            'responseCode':'20000','transactionTime':stamp,
+            'metaData':{'customerName':'TEST SENDER'}}}
+        await record_transfer(session, ref, parse_transfer(json.dumps(payload).encode()))
+    matches = await bank.candidates(session,cid)
+    assert len(matches) == 1
+    async with session() as s:
+        assert len((await s.scalars(select(BankDeposit))).all()) == 1
+        assert (await s.get(User,99)).balance == Decimal('10.00')
