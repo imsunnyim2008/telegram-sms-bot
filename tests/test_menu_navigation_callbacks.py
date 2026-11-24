@@ -44,7 +44,7 @@ async def test_customer_menu_navigation_edits_in_place(setup_database):
         ("balance", "Your balance:"),
         ("help", "Friday Commands"),
         ("orders", "No orders yet"),
-        ("topup", "Minimum deposit: $5"),
+        ("topup", "Choose a deposit method"),
         ("menu:home", "Welcome! Choose an option"),
         ("clear:cancel", "Welcome! Choose an option"),
     ], start=1):

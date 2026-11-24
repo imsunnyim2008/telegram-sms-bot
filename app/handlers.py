@@ -829,9 +829,10 @@ async def prompt_topup(target, uid: int, *, edit: bool = False, crypto_only=Fals
     if hasattr(target, 'chat') and target.chat.type != 'private':
         return await target.answer('Open Friday in a private chat to top up.')
     cfg = await bank.config(Session)
-    if bank.ready(cfg) and not crypto_only:
+    if not crypto_only:
         await clear_flow(uid)
-        return await show_selection_menu(target, 'Choose a deposit method:',
+        status = '' if bank.ready(cfg) else '\nBank transfer is not yet enabled; configuration is required.'
+        return await show_selection_menu(target, 'Choose a deposit method:' + status,
             keyboard([[('🇳🇬 Nigerian bank transfer', 'ui:bankstart')],
                       [('🪙 Cryptocurrency', 'ui:bankcrypto')],
                       [('My bank claims', 'ui:bankclaims')], [('⬅️ Main menu', 'menu:home')]]), edit=edit)
@@ -852,11 +853,7 @@ async def topup_command(message: Message):
     uid = message.from_user.id
     if not await allowed(uid, message):
         return
-    parts = (message.text or '').split(maxsplit=1)
-    if len(parts) == 1:
-        await prompt_topup(message, uid)
-    else:
-        await send_topup_invoice(message, uid, parts[1])
+    await prompt_topup(message, uid)
 
 
 def admin_only(message: Message) -> bool:
@@ -1801,7 +1798,11 @@ async def bank_button(target, uid, parts):
     elif name == 'bankstart':
         cfg = await bank.config(Session)
         if not bank.ready(cfg):
-            await target.answer('Bank transfers are currently unavailable.')
+            if uid in settings.admins:
+                await bank_admin_card(target)
+            else:
+                await show_selection_menu(target, 'Bank transfers are currently unavailable. Choose cryptocurrency or contact support.',
+                    keyboard([[('🪙 Cryptocurrency', 'ui:bankcrypto')], [('⬅️ Main menu', 'menu:home')]]), edit=True)
         else:
             await save_flow(uid, {'type': 'bank_input', 'action': 'amount'})
             await show_selection_menu(target,
@@ -1886,9 +1887,21 @@ async def bank_input(message,uid,flow,raw):
     try:
         action=flow.get('action')
         if action=='config':
-            await bank.update_config(Session,uid,flow['field'],raw)
+            field = flow['field']
+            await bank.update_config(Session,uid,field,raw)
+            cfg = await bank.config(Session)
+            next_field = next((key for key in ('name', 'account', 'rate') if not cfg.get(key)), None)
+            if next_field:
+                await save_flow(uid, {'type':'bank_input','action':'config','field':next_field})
+                prompt = {'name':'Enter bank account name.',
+                          'account':'Enter your 10-digit Moniepoint account number.',
+                          'rate':'Enter the exchange rate in NGN per USD.'}[next_field]
+                return await show_selection_menu(message, '✅ Saved. Next: ' + prompt,
+                    keyboard([[('Cancel / Bank settings','ui:bankadmin')]]))
             await clear_flow(uid)
-            return await message.answer('Saved. Open Admin → Bank transfers to view or enable.')
+            return await show_selection_menu(message, '✅ Bank details saved. Review them and tap Enable to start accepting transfers.',
+                keyboard([[('Review bank settings','ui:bankadmin')],
+                          [('Enable bank transfers','ui:banktoggle:on')]]))
         if not await private_customer(message):
             return
         cfg=await bank.config(Session)
