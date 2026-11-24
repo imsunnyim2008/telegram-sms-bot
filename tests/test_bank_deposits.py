@@ -96,3 +96,30 @@ async def test_configuration_changes_disable_public_bank_payments(setup_database
     assert not bank.ready(await bank.config(session))
     with pytest.raises(ValueError):
         await bank.update_config(session,99,'enabled',True)
+
+
+@pytest.mark.asyncio
+async def test_remark_session_and_transaction_number_match_without_automatic_credit(setup_database, monkeypatch):
+    session, _, _ = setup_database
+    await configure(session, monkeypatch)
+    remark = bank.new_remark()
+    assert len(remark) == 30 and remark != bank.new_remark()
+    session_id = '0' * 29 + '1'
+    number = '123456789012345678901234'
+    claim = await bank.create_claim(session, 99, 10000, '1500', 'remark', remark)
+    session_claim = await bank.create_claim(session, 99, 10000, '1500', 'session', session_id)
+    number_claim = await bank.create_claim(session, 99, 10000, '1500', 'id', number)
+    payload = {'eventType':'V1_TRANSFER_TRANSACTION','data':{
+        'amount':10000,'transactionReference':'real-reference','transactionStatus':'COMPLETED',
+        'responseCode':'20000','narration': 'TRANSFER ' + remark,
+        'sessionId': session_id,'transactionNumber':number}}
+    data = parse_transfer(json.dumps(payload).encode())
+    assert remark not in str(data)
+    assert session_id not in str(data)
+    assert number not in str(data)
+    await record_transfer(session, 'matched-rem', data)
+    for cid in (claim, session_claim, number_claim):
+        assert len(await bank.candidates(session, cid)) == 1
+    async with session() as s:
+        assert (await s.get(User,99)).balance == Decimal('10.00')
+        assert (await s.get(BankDeposit,claim)).status == 'pending'
