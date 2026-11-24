@@ -51,7 +51,7 @@ async def test_history_only_contains_own_transactions(setup_database):
 
 @pytest.mark.asyncio
 async def test_maintenance_requires_private_admin(setup_database):
-    session, _, _ = setup_database
+    session, shop, _ = setup_database
     guest = fixtures.Target(uid=99, text='/maintenance on')
     await handlers.admin_maintenance(guest)
     assert 'Admin only' in guest.answers[-1][0]
@@ -59,6 +59,9 @@ async def test_maintenance_requires_private_admin(setup_database):
     await handlers.admin_maintenance(admin)
     async with session() as db:
         assert (await db.get(Setting, 'purchase_maintenance')).value == 'on'
+    from app.business import BotError
+    with pytest.raises(BotError, match='paused for maintenance'):
+        await shop.buy(99, 'telegram', '12')
     admin.text = '/maintenance off'
     await handlers.admin_maintenance(admin)
     async with session() as db:
