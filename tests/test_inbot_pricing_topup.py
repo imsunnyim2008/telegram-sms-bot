@@ -102,7 +102,7 @@ async def test_topup_prompts_and_rejects_under_5_without_creating_invoice(setup_
     assert 'Choose a deposit method' in message.answers[0][0]
     assert await handlers.read_flow(99) is None
     await handlers.bank_button(message, 99, ['bankcrypto'])
-    assert 'Minimum deposit: $5' in message.answers[-1][0]
+    assert 'Minimum deposit: $5' in message.edits[-1][0]
     assert (await handlers.read_flow(99))['type'] == 'topup'
     message.text = '4'
     await handlers.handle_pending_text(message)
@@ -243,3 +243,16 @@ async def test_clear_chat_requires_confirmation_and_bulk_deletes_own_chat(setup_
     other.bot = bot
     await handlers.clear_chat_confirm(other, 99)
     assert other.answers[-1][0].startswith('Chat cleanup is only')
+
+
+@pytest.mark.asyncio
+async def test_topup_always_shows_both_choices_and_admin_bank_setup(setup_database, monkeypatch):
+    session, _, gateway = setup_database
+    monkeypatch.delenv('MONIEPOINT_WEBHOOK_SECRET', raising=False)
+    message = Target(uid=7031009238)
+    await handlers.prompt_topup(message, 7031009238)
+    buttons = message.answers[-1][1]['reply_markup'].inline_keyboard
+    assert {'ui:bankstart', 'ui:bankcrypto'} <= {b.callback_data for row in buttons for b in row}
+    await handlers.bank_button(message, 7031009238, ['bankstart'])
+    assert 'Set account name' in str(message.edits[-1][1]['reply_markup'])
+    assert not gateway.invoices
