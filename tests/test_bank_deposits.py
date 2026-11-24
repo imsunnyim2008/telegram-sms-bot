@@ -21,7 +21,7 @@ async def configure(session, monkeypatch):
     await bank.update_config(session, ADMIN, 'enabled', True)
 
 
-async def event(session, kind, ref, name='Test Sender', amount=10000, status='COMPLETED', wid='event-1'):
+async def event(session, kind, ref, name='Test Sender', amount=50000, status='COMPLETED', wid='event-1'):
     body = json.dumps({'eventType':kind, 'data': {
         'amount':amount, 'transactionReference':ref, 'transactionStatus':status,
         'responseCode':'20000', 'retrievalReferenceNumber':'123456789012',
@@ -29,11 +29,10 @@ async def event(session, kind, ref, name='Test Sender', amount=10000, status='CO
     await record_transfer(session, wid, parse_transfer(body))
 
 
-def test_any_positive_naira_amount():
-    assert bank.amount_kobo('0.01') == 1
-    assert bank.amount_kobo('1') == 100
-    assert bank.amount_kobo('100.50') == 10050
-    for value in ('0', '-1', 'NaN', '1.001'):
+def test_naira_minimum():
+    assert bank.amount_kobo('500') == 50000
+    assert bank.amount_kobo('500.50') == 50050
+    for value in ('0', '-1', 'NaN', '1.001', '100', '499.99'):
         with pytest.raises(ValueError):
             bank.amount_kobo(value)
 
@@ -44,8 +43,8 @@ async def test_verified_claim_requires_review_and_credits_once(setup_database, m
     await configure(session, monkeypatch)
     async with session() as s:
         before = (await s.get(User, 99)).balance
-    cid = await bank.create_claim(session, 99, 10000, '1500', 'id', 'ref-123')
-    duplicate = await bank.create_claim(session, ADMIN, 10000, '1500', 'name', 'Test Sender')
+    cid = await bank.create_claim(session, 99, 50000, '1500', 'id', 'ref-123')
+    duplicate = await bank.create_claim(session, ADMIN, 50000, '1500', 'name', 'Test Sender')
     assert not await bank.candidates(session, cid)
     await event(session, 'V1_POS_WITHDRAWAL_TRANSACTION', 'ref-123', wid='withdrawal-1')
     assert not await bank.candidates(session, cid)
@@ -65,7 +64,7 @@ async def test_verified_claim_requires_review_and_credits_once(setup_database, m
     with pytest.raises(ValueError):
         await bank.approve(session, ADMIN, cid, matches[0].event_key)
     async with session() as s:
-        assert (await s.get(User, 99)).balance == before + Decimal('0.0666')
+        assert (await s.get(User, 99)).balance == before + Decimal('0.3333')
         claim = await s.get(BankDeposit, cid)
         assert claim.status == 'paid'
         assert len((await s.scalars(select(LedgerEntry).where(LedgerEntry.ref_id == str(claim.payment_id),
@@ -76,14 +75,14 @@ async def test_verified_claim_requires_review_and_credits_once(setup_database, m
 async def test_name_collision_and_reference_lookup(setup_database, monkeypatch):
     session, _, _ = setup_database
     await configure(session, monkeypatch)
-    name_claim = await bank.create_claim(session,99,10000,'1500','name','Test Sender')
+    name_claim = await bank.create_claim(session,99,50000,'1500','name','Test Sender')
     await event(session,'V1_TRANSFER_TRANSACTION','ref-a',wid='a')
     await event(session,'V1_TRANSFER_TRANSACTION','ref-b',wid='b')
     matches = await bank.candidates(session,name_claim)
     assert len(matches) == 2
     with pytest.raises(ValueError):
         await bank.approve(session,ADMIN,name_claim,matches[0].event_key)
-    id_claim = await bank.create_claim(session,99,10000,'1500','id','ref-a')
+    id_claim = await bank.create_claim(session,99,50000,'1500','id','ref-a')
     assert len(await bank.candidates(session,id_claim)) == 1
 
 
@@ -106,11 +105,11 @@ async def test_remark_session_and_transaction_number_match_without_automatic_cre
     assert len(remark) == 30 and remark != bank.new_remark()
     session_id = '0' * 29 + '1'
     number = '123456789012345678901234'
-    claim = await bank.create_claim(session, 99, 10000, '1500', 'remark', remark)
-    session_claim = await bank.create_claim(session, 99, 10000, '1500', 'session', session_id)
-    number_claim = await bank.create_claim(session, 99, 10000, '1500', 'id', number)
+    claim = await bank.create_claim(session, 99, 50000, '1500', 'remark', remark)
+    session_claim = await bank.create_claim(session, 99, 50000, '1500', 'session', session_id)
+    number_claim = await bank.create_claim(session, 99, 50000, '1500', 'id', number)
     payload = {'eventType':'V1_TRANSFER_TRANSACTION','data':{
-        'amount':10000,'transactionReference':'real-reference','transactionStatus':'COMPLETED',
+        'amount':50000,'transactionReference':'real-reference','transactionStatus':'COMPLETED',
         'responseCode':'20000','narration': 'TRANSFER ' + remark,
         'sessionId': session_id,'transactionNumber':number}}
     data = parse_transfer(json.dumps(payload).encode())
@@ -123,3 +122,14 @@ async def test_remark_session_and_transaction_number_match_without_automatic_cre
     async with session() as s:
         assert (await s.get(User,99)).balance == Decimal('10.00')
         assert (await s.get(BankDeposit,claim)).status == 'pending'
+
+
+@pytest.mark.asyncio
+async def test_new_claim_minimum_and_previous_quote(setup_database, monkeypatch):
+    session, _, _ = setup_database
+    await configure(session, monkeypatch)
+    with pytest.raises(ValueError, match='500'):
+        await bank.create_claim(session, 99, 49999, '1500', 'id', 'old-reference')
+    claim = await bank.create_claim(session, 99, 10000, '1500', 'id', 'old-reference', existing_quote=True)
+    async with session() as s:
+        assert (await s.get(BankDeposit, claim)).amount_kobo == 10000
