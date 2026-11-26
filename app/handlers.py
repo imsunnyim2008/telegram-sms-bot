@@ -1082,9 +1082,12 @@ async def admin_stats(message: Message):
                                  .where(Activation.status == 'completed'))
         revenue = await s.scalar(select(func.coalesce(func.sum(Activation.price_charged), 0))
                                  .where(Activation.status == 'completed'))
-        costs = await s.scalar(select(func.coalesce(func.sum(Activation.cost_provider), 0))
-                               .where(Activation.status == 'completed'))
-    converted = Decimal(str(costs)) * settings.provider_price_to_wallet
+        costs = (await s.execute(select(Activation.provider, func.sum(Activation.cost_provider))
+                 .where(Activation.status == 'completed').group_by(Activation.provider))).all()
+    known = settings.wallet_currency == 'USD' and all(p in ('textverified', 'smspool') for p, _ in costs)
+    converted = sum((Decimal(str(cost)) for _, cost in costs), Decimal('0')) if known else None
+    cost_label = str(converted) if known else 'unavailable (historical FX missing)'
+    profit_label = str(Decimal(str(revenue))-converted) if known else 'unavailable (historical FX missing)'
     try:
         provider_balance = str(await shop.provider.get_balance())
     except Exception:
@@ -1092,8 +1095,8 @@ async def admin_stats(message: Message):
     await message.answer(f'Users: {users}\nOrders: {total}\nCompleted: {success}\n'
                          f'Success: {(100*success/total if total else 0):.1f}%\n'
                          f'Revenue: {revenue} {settings.wallet_currency}\n'
-                         f'Estimated provider cost: {converted} {settings.wallet_currency}\n'
-                         f'Estimated profit: {Decimal(str(revenue))-converted} {settings.wallet_currency}\n'
+                         f'Estimated provider cost: {cost_label} {settings.wallet_currency}\n'
+                         f'Estimated profit: {profit_label} {settings.wallet_currency}\n'
                          f'Provider balance (raw): {provider_balance}')
 
 
@@ -2027,7 +2030,7 @@ async def operations_button(target, uid, parts):
               'recovering' if state.get('healthy_since') else
               'outage' if state.get('incident') else 'healthy')
         await show_selection_menu(target, f'📡 System health\nDatabase: responding\n'
-                                  f'TextVerified: {tv}\nLast sample: {str(age)+"s ago" if age is not None else "none"}\n'
+                                  f'{settings.provider_name}: {tv}\nLast sample: {str(age)+"s ago" if age is not None else "none"}\n'
                                   f'Payment gateway: {gateway.value if gateway else "not sampled"}\n'
                                   f'Purchase maintenance: {pause.value if pause else "off"}\n'
                                   f'Process uptime: {int((time.monotonic()-STARTED_AT)//60)} min\n'
@@ -2167,7 +2170,7 @@ async def referral_command(message: Message):
     bot = await message.bot.get_me()
     count = await referral_count(Session, uid)
     await message.answer(f'Your referral link: https://t.me/{bot.username}?start=ref_{uid}\n'
-                         f'Referrals recorded: {count}\\nNo automatic wallet reward is enabled.')
+                         f'Referrals recorded: {count}\nNo automatic wallet reward is enabled.')
 
 
 @router.message(Command('reportnumber'))
@@ -2209,7 +2212,7 @@ async def handle_pending_text(message: Message):
     if uid in settings.admins and reply and getattr(reply, 'from_user', None):
         original = reply.text or ''
         bot = getattr(message, 'bot', None)
-        if bot and reply.from_user.id == bot.id and original.startswith('🚨 FRIDAY: TextVerified outage'):
+        if bot and reply.from_user.id == bot.id and original.startswith(('🚨 FRIDAY: TextVerified outage', '🚨 FRIDAY: textverified outage', '🚨 FRIDAY: smspool outage')):
             marker = next((line[10:] for line in original.splitlines() if line.startswith('Incident: ')), '')
             if marker and await acknowledge(Session, marker):
                 return await message.answer('✅ Outage acknowledged. Monitoring continues.')

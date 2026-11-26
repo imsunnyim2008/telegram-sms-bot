@@ -141,14 +141,14 @@ class Worker:
             event = notice['event']
             incident = notice.get('incident')
             messages = {
-                'outage': ('🚨 FRIDAY: TextVerified outage detected.\n'
+                'outage': (f'🚨 FRIDAY: {settings.provider_name} outage detected.\n'
                            f'Incident: {incident}\n'
                            'Acknowledge this alert or reply directly to it. If the API is still down '
                            'after 30 minutes without acknowledgment, new purchases will automatically pause.'),
                 'paused': '🛠 FRIDAY automatically enabled purchase maintenance after 30 minutes without acknowledgment. Customers will be notified.',
-                'recovering': '🟡 TextVerified is responding again. Friday will resume automatically after 10 continuous minutes of successful checks, unless you take manual control.',
-                'recovered': '🟢 TextVerified API is responding again.',
-                'resumed': '🟢 FRIDAY automatically disabled purchase maintenance after 10 continuous minutes of healthy TextVerified checks. Customers will be notified.',
+                'recovering': f'🟡 {settings.provider_name} is responding again. Friday will resume automatically after 10 continuous minutes of successful checks, unless you take manual control.',
+                'recovered': f'🟢 {settings.provider_name} API is responding again.',
+                'resumed': f'🟢 FRIDAY automatically disabled purchase maintenance after 10 continuous minutes of healthy {settings.provider_name} checks. Customers will be notified.',
             }
             for admin in settings.admins:
                 if admin in notice.get('sent', []):
@@ -213,7 +213,7 @@ class Worker:
 
         jobs = []
         if settings.provider_credentials_ready:
-            if settings.provider_name == 'textverified':
+            if settings.provider_name in ('textverified', 'smspool'):
                 jobs.append(self.textverified_health())
             else:
                 jobs.extend([

@@ -69,6 +69,8 @@ async def watch_stock(session, uid, service, country):
         if not user or user.is_banned or not user.accepted_terms:
             return False
         key = f'watch:{uid}:{service}:{country}'
+        if len(key) > 80:
+            raise ValueError('Stock selection too long')
         keys = (await s.scalars(select(Setting.key).where(Setting.key.startswith(f'watch:{uid}:')).limit(6))).all()
         if len(keys) >= 5 and key not in keys:
             return False
