@@ -4,12 +4,13 @@ from decimal import Decimal
 
 from app.config import settings
 from app.smspool import SMSPool
-from app.provider import ProviderError, AmbiguousPurchase
+from app.provider import AmbiguousPurchase
 
 
 @pytest.mark.asyncio
 async def test_smspool_catalogue_and_refund(monkeypatch):
     monkeypatch.setattr(settings, 'smspool_api_key', 'test-only')
+    monkeypatch.setattr('app.smspool.time.monotonic', lambda: 10.0)
     monkeypatch.setattr(settings, 'allowed_services', 'discord')
     monkeypatch.setattr(settings, 'allowed_countries', 'us')
     def respond(request):

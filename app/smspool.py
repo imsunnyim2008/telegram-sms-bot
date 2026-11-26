@@ -35,7 +35,7 @@ class SMSPool:
     def __init__(self, client=None):
         self.client = client or httpx.AsyncClient(timeout=12, follow_redirects=False)
         self._cache = []
-        self._cached_at = 0.0
+        self._cached_at = None
         self._lock = asyncio.Lock()
 
     async def _request(self, path, *, method='POST', data=None, purchase=False):
@@ -65,10 +65,10 @@ class SMSPool:
         return dict(COUNTRIES)
 
     async def get_prices(self, *, fresh=False):
-        if not fresh and time.monotonic() - self._cached_at < 60:
+        if not fresh and self._cached_at is not None and time.monotonic() - self._cached_at < 60:
             return self._cache
         async with self._lock:
-            if not fresh and time.monotonic() - self._cached_at < 60:
+            if not fresh and self._cached_at is not None and time.monotonic() - self._cached_at < 60:
                 return self._cache
             catalog = await self._request('/service/retrieve_all', method='GET')
             if not isinstance(catalog, list):
