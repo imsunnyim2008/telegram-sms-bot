@@ -130,10 +130,10 @@ async def report(session, start, end):
         pending = await s.scalar(select(func.count()).select_from(Payment).where(Payment.status == 'created'))
     zero = Decimal('0')
     revenue = sum((Decimal(str(g[2])) for g in groups), zero)
-    # TextVerified is USD. Historical other providers have no stored FX snapshot.
-    known_cost = sum((Decimal(str(g[3])) for g in groups if g[0] == 'textverified'
+    # TextVerified and SMSPool quote USD. Other historical providers lack an FX snapshot.
+    known_cost = sum((Decimal(str(g[3])) for g in groups if g[0] in ('textverified', 'smspool')
                       and settings.wallet_currency == 'USD'), zero)
-    unknown = any(g[0] != 'textverified' or settings.wallet_currency != 'USD' for g in groups)
+    unknown = any(g[0] not in ('textverified', 'smspool') or settings.wallet_currency != 'USD' for g in groups)
     cur = settings.wallet_currency
     profit = ('Unavailable: historical provider FX not recorded' if unknown else
               f'{revenue-known_cost:.4f} {cur} (before gateway/hosting fees)')

@@ -10,6 +10,7 @@ from sqlalchemy import func, select
 from .config import settings
 from .db import Activation, Payment, Session, Setting, User, utcnow
 from .gateway import CryptoBot
+from .growth_controls import service_paused, margin_discount
 from .ledger import InsufficientFunds, apply
 from .provider import AmbiguousPurchase, PriceItem, ProviderError, ProviderClient
 
@@ -95,9 +96,14 @@ class Shop:
         async with Session() as s:
             markup = await s.get(Setting, 'markup_percent')
             override = await s.get(Setting, f'price:{item.service}:{item.country}')
+            assigned = await s.get(Setting, f'promo_user:{user_id}') if user_id is not None else None
+            promo = await s.get(Setting, 'promo:' + assigned.value) if assigned else None
         percentage = Decimal(markup.value) if markup else settings.markup_percent
         custom = Decimal(override.value) if override else None
-        return self.price_from_settings(item, percentage, custom)
+        price = self.price_from_settings(item, percentage, custom)
+        if promo:
+            price = margin_discount(price, self.original_price(item), Decimal(promo.value))
+        return price.quantize(Q, rounding=ROUND_UP)
 
     async def quote(self, service: str, country: str,
                     user_id: int | None = None) -> tuple[PriceItem, Decimal]:
@@ -116,6 +122,8 @@ class Shop:
         if await self.provider.get_balance() < item.cost:
             raise BotError('Provider balance is insufficient. Please try again later.')
         async with Session.begin() as s:
+            if await service_paused(s, service):
+                raise BotError('This service is temporarily paused. Existing orders remain available.')
             pause = await s.get(Setting, 'purchase_maintenance')
             if pause and pause.value == 'on':
                 raise BotError('New purchases are paused for maintenance. Existing orders remain available.')

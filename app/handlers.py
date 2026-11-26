@@ -24,6 +24,8 @@ from .operations import LAGOS, STARTED_AT, audit, claim_purchase, notice, report
 from .moniepoint import pilot_status
 from .auto_maintenance import acknowledge, manual_mode
 from .ledger import InsufficientFunds, apply
+from .growth_controls import (set_service_pause, set_promo, redeem_promo, watch_stock,
+                              record_referral, referral_count, SERVICE, PROMO)
 from .service_ui import (app_label_html, custom_emoji_unavailable,
                          without_custom_emoji)
 
@@ -102,6 +104,11 @@ async def allowed(uid: int, target) -> bool:
 @router.message(CommandStart(ignore_case=True))
 async def start(message: Message):
     u = await shop.ensure_user(message.from_user.id, message.from_user.username or '')
+    payload = (getattr(message, 'text', '') or '').split(maxsplit=1)
+    if not u.accepted_terms and len(payload) == 2 and payload[1].startswith('ref_'):
+        ref = payload[1][4:]
+        if ref.isascii() and ref.isdigit() and len(ref) <= 16:
+            await record_referral(Session, message.from_user.id, int(ref))
     if u.is_banned:
         await message.answer('Account restricted. Contact support.')
     elif not u.accepted_terms:
@@ -1100,7 +1107,7 @@ async def admin_broadcast(message: Message):
     if len(parts[1]) > 1000:
         return await message.answer('Maximum broadcast length is 1000 characters.')
     async with Session() as s:
-        ids = (await s.scalars(select(User.id).where(User.is_banned.is_(False)))).all()
+        ids = (await s.scalars(select(User.id).where(User.is_banned.is_(False), User.accepted_terms.is_(True)))).all()
     delivered, failed = 0, 0
     for uid in ids:
         try:
@@ -2090,6 +2097,102 @@ async def operations_input(message, uid, flow, raw):
             audit(s, uid, 'low_balance_threshold', str(amount))
         await clear_flow(uid)
         await message.answer(f'Low balance threshold saved: {amount}.')
+
+
+@router.message(Command('servicemode'))
+async def service_mode_command(message: Message):
+    if not await private_admin(message):
+        return
+    parts = message.text.split()
+    if len(parts) != 3 or not SERVICE.fullmatch(parts[1]) or not settings.service_allowed(parts[1]) or parts[2] not in ('on', 'off'):
+        return await message.answer('Usage: /servicemode SERVICE on/off (on pauses new purchases)')
+    await set_service_pause(Session, message.from_user.id, parts[1], parts[2])
+    await message.answer(f'Service {parts[1]} maintenance: {parts[2]}. Existing orders unchanged.')
+
+
+@router.message(Command('setpromo'))
+async def promo_config_command(message: Message):
+    if not await private_admin(message):
+        return
+    parts = message.text.split()
+    try:
+        if len(parts) != 3 or len(parts[2]) > 8:
+            raise ValueError()
+        await set_promo(Session, message.from_user.id, parts[1].upper(), Decimal(parts[2]))
+    except (ValueError, InvalidOperation):
+        return await message.answer('Usage: /setpromo CODE PERCENT (0-100% of markup only; 0 disables)')
+    await message.answer('Promotion saved. Discount applies only to the margin, never to provider cost.')
+
+
+@router.message(Command('promo'))
+async def promo_command(message: Message):
+    if not await private_customer(message):
+        return
+    parts = message.text.split()
+    if len(parts) != 2 or not PROMO.fullmatch(parts[1].upper()):
+        return await message.answer('Usage: /promo CODE')
+    if message.from_user.id in settings.admins:
+        return await message.answer('Admin already pays the original provider price.')
+    if await redeem_promo(Session, message.from_user.id, parts[1].upper()):
+        return await message.answer('Promotion applied to eligible future purchases while active.')
+    await message.answer('Promotion unavailable.')
+
+
+@router.message(Command('stockalert', 'stockoff'))
+async def stock_alert_command(message: Message):
+    if not await private_customer(message):
+        return
+    uid = message.from_user.id
+    parts = message.text.split()
+    if parts[0].split('@')[0] == '/stockoff':
+        async with Session.begin() as s:
+            rows = (await s.scalars(select(Setting).where(Setting.key.startswith(f'watch:{uid}:')))).all()
+            for row in rows:
+                await s.delete(row)
+        return await message.answer('Stock alerts disabled.')
+    if len(parts) != 3 or not settings.service_allowed(parts[1]) or not settings.country_allowed(parts[2]):
+        return await message.answer('Usage: /stockalert SERVICE COUNTRY (country code, e.g. us)')
+    try:
+        saved = await watch_stock(Session, uid, parts[1], parts[2])
+    except ValueError:
+        saved = False
+    await message.answer('One-time stock alert saved. /stockoff cancels alerts.' if saved else 'Alert unavailable or maximum 5 active alerts reached.')
+
+
+@router.message(Command('referral'))
+async def referral_command(message: Message):
+    if not await private_customer(message):
+        return
+    uid = message.from_user.id
+    bot = await message.bot.get_me()
+    count = await referral_count(Session, uid)
+    await message.answer(f'Your referral link: https://t.me/{bot.username}?start=ref_{uid}\n'
+                         f'Referrals recorded: {count}\\nNo automatic wallet reward is enabled.')
+
+
+@router.message(Command('reportnumber'))
+async def report_number_command(message: Message):
+    if not await private_customer(message):
+        return
+    parts = message.text.split()
+    if len(parts) != 2 or not parts[1].isdigit() or len(parts[1]) > 9:
+        return await message.answer('Usage: /reportnumber ORDER_ID. Do not include phone numbers or codes.')
+    aid, uid = int(parts[1]), message.from_user.id
+    async with Session.begin() as s:
+        row = await s.get(Activation, aid, with_for_update=True)
+        if not row or row.user_id != uid:
+            return await message.answer('Order not found.')
+        key = f'support_order:{aid}'
+        if await s.get(Setting, key) is None:
+            s.add(Setting(key=key, value=utcnow().isoformat()))
+        report_key = f'number_report:{aid}'
+        if await s.get(Setting, report_key) is None:
+            s.add(Setting(key=report_key, value=utcnow().isoformat()))
+            for admin in settings.admins:
+                await notice(s, f'numberreport:{aid}:{admin}', admin,
+                             f'Customer reported a rejected number for order #{aid}. Review through /tickets.')
+    await message.answer(f'Report recorded for order #{aid}. Refunds require confirmed eligibility.',
+                         reply_markup=keyboard([[('View ticket', f'ui:thread:{aid}')]]))
 
 
 @router.message(F.text)

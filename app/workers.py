@@ -11,6 +11,7 @@ from .auto_maintenance import mark_notice_sent, observe, pending_notices
 from .config import settings
 from .db import Activation, MaintenanceNotice, OpsNotice, Payment, Session, Setting, User, utcnow
 from .provider import ProviderError
+from .growth_controls import stock_notices
 from .operations import reconcile_inbox, schedule_daily_report, schedule_risk_alert, send_notices
 from .service_ui import app_label_html
 from .textverified_webhooks import prune_old_receipts
@@ -103,7 +104,8 @@ class Worker:
                     await asyncio.gather(reconcile_inbox(Session, self.shop),
                                          schedule_daily_report(Session),
                                          schedule_risk_alert(Session),
-                                         self.low_balance_alert())
+                                         self.low_balance_alert(),
+                                         stock_notices(Session, self.shop))
             except asyncio.CancelledError:
                 raise
             except Exception:
