@@ -14,6 +14,7 @@ class Config(BaseSettings):
     provider_api_key: str = ''
     textverified_api_username: str = ''
     textverified_api_key: str = ''
+    smspool_api_key: str = ''
     textverified_webhook_secret: str = ''
     live_purchases_enabled: bool = False
     wallet_currency: str = 'USD'
@@ -54,12 +55,14 @@ class Config(BaseSettings):
     def provider_credentials_ready(self) -> bool:
         if self.provider_name == 'textverified':
             return bool(self.textverified_api_username and self.textverified_api_key)
+        if self.provider_name == 'smspool':
+            return bool(self.smspool_api_key)
         return bool(self.provider_api_key)
 
     @property
     def live_ready(self) -> bool:
-        # TextVerified already quotes USD prices. Conversion must be exactly 1.
-        if self.provider_name == 'textverified':
+        # Both providers quote USD prices. Conversion must be exactly 1.
+        if self.provider_name in ('textverified', 'smspool'):
             return bool(self.live_purchases_enabled and self.provider_credentials_ready
                         and self.wallet_currency == 'USD'
                         and self.provider_price_to_wallet == Decimal('1'))

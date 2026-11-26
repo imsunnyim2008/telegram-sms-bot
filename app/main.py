@@ -25,6 +25,7 @@ from .command_menu import register_native_menu
 from .provider import FiveSim
 from .grizzly import GrizzlySms
 from .textverified import TextVerifiedSms
+from .smspool import SMSPool
 from .textverified_webhooks import (valid_signature as valid_textverified_signature,
                                     parse_event as parse_textverified_event,
                                     wake_matching_orders)
@@ -97,6 +98,12 @@ async def probe_smspool():
                 log.info('SMSPool diagnostic: service catalog OK (%s entries)', len(services))
             else:
                 log.warning('SMSPool diagnostic: service catalog response not confirmed')
+            probe = SMSPool()
+            try:
+                prices = await probe.get_prices(fresh=True)
+                log.info('SMSPool diagnostic: %s confirmed priced stock offers', len(prices))
+            finally:
+                await probe.aclose()
     except Exception as exc:
         # No credentials, raw provider data or balance values in logs.
         log.warning('SMSPool diagnostic failed (%s)', type(exc).__name__)
@@ -125,6 +132,7 @@ async def lifespan(app: FastAPI):
         'grizzly': GrizzlySms(),
         'fivesim': FiveSim(),
         'textverified': TextVerifiedSms(),
+        'smspool': SMSPool(),
     }
     provider = providers.get(settings.provider_name)
     if provider is None:
