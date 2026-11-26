@@ -15,6 +15,7 @@ class Config(BaseSettings):
     textverified_api_username: str = ''
     textverified_api_key: str = ''
     smspool_api_key: str = ''
+    smspool_webhook_secret: str = ''
     textverified_webhook_secret: str = ''
     live_purchases_enabled: bool = False
     wallet_currency: str = 'USD'

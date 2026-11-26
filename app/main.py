@@ -26,6 +26,9 @@ from .provider import FiveSim
 from .grizzly import GrizzlySms
 from .textverified import TextVerifiedSms
 from .smspool import SMSPool
+from .smspool_webhooks import (valid_signature as valid_smspool_signature,
+                               parse_event as parse_smspool_event,
+                               wake_matching_order as wake_smspool_order)
 from .textverified_webhooks import (valid_signature as valid_textverified_signature,
                                     parse_event as parse_textverified_event,
                                     wake_matching_orders)
@@ -253,6 +256,30 @@ async def textverified_webhook(request: Request):
     # code from the authenticated provider API. The public request is never
     # allowed to set an OTP, credit wallets, cancel, or purchase a number.
     await wake_matching_orders(event)
+    return {'ok': True}
+
+
+@web.post('/webhook/smspool')
+async def smspool_webhook(request: Request):
+    if not settings.smspool_webhook_secret:
+        raise HTTPException(status_code=503, detail='SMSPool signing secret not configured')
+    body = bytearray()
+    async for chunk in request.stream():
+        body.extend(chunk)
+        if len(body) > 65536:
+            raise HTTPException(status_code=413, detail='Payload too large')
+    raw = bytes(body)
+    if not valid_smspool_signature(raw, request.headers.get('x-smspool-signature', ''),
+                                   settings.smspool_webhook_secret):
+        raise HTTPException(status_code=401, detail='Invalid webhook signature')
+    try:
+        event = parse_smspool_event(raw)
+    except (ValueError, TypeError):
+        raise HTTPException(status_code=400, detail='Malformed SMSPool event')
+    if event['event'] == 'webhook.test':
+        log.info('SMSPool signed webhook test accepted')
+    else:
+        await wake_smspool_order(event)
     return {'ok': True}
 
 
