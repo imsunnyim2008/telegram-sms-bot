@@ -5,7 +5,7 @@ from secrets import token_hex
 
 from sqlalchemy import select
 
-from .db import Setting, User, utcnow
+from .db import Setting, User
 from .operations import audit, notice, insert_once
 
 SERVICE = re.compile(r'^[a-z0-9_]{1,40}$')
