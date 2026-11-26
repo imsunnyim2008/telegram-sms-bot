@@ -4,6 +4,9 @@ import hashlib
 import hmac
 import json
 import logging
+import os
+
+import httpx
 from contextlib import asynccontextmanager
 
 from aiogram import Bot, Dispatcher
@@ -65,6 +68,40 @@ class TelegramNotifier:
 runtime = {}
 
 
+async def probe_smspool():
+    """Read-only credential and catalog diagnostic; never creates orders."""
+    key = os.environ.get('SMSPOOL_API_KEY', '').strip()
+    if not key:
+        log.info('SMSPool diagnostic: API key not configured')
+        return
+    try:
+        async with httpx.AsyncClient(timeout=10, follow_redirects=False) as client:
+            headers = {'Authorization': 'Bearer ' + key, 'Accept': 'application/json'}
+            balance = await client.post('https://api.smspool.net/request/balance',
+                                        headers=headers)
+            if balance.status_code != 200:
+                log.warning('SMSPool diagnostic: balance HTTP %s', balance.status_code)
+                return
+            data = balance.json()
+            if not isinstance(data, dict) or str(data.get('success', '1')) in ('0', 'False', 'false') or 'balance' not in data:
+                log.warning('SMSPool diagnostic: balance response not confirmed')
+                return
+            log.info('SMSPool diagnostic: authenticated balance check OK')
+            catalog = await client.get('https://api.smspool.net/service/retrieve_all',
+                                       headers=headers)
+            if catalog.status_code != 200:
+                log.warning('SMSPool diagnostic: catalog HTTP %s', catalog.status_code)
+                return
+            services = catalog.json()
+            if isinstance(services, list) and services:
+                log.info('SMSPool diagnostic: service catalog OK (%s entries)', len(services))
+            else:
+                log.warning('SMSPool diagnostic: service catalog response not confirmed')
+    except Exception as exc:
+        # No credentials, raw provider data or balance values in logs.
+        log.warning('SMSPool diagnostic failed (%s)', type(exc).__name__)
+
+
 @asynccontextmanager
 async def lifespan(app: FastAPI):
     if not settings.bot_token:
@@ -114,7 +151,7 @@ async def lifespan(app: FastAPI):
     )
     await register_native_menu(bot, settings.admins)
     tasks = [asyncio.create_task(worker.run()), asyncio.create_task(worker.run_health_monitor()),
-             asyncio.create_task(worker.run_operations())]
+             asyncio.create_task(worker.run_operations()), asyncio.create_task(probe_smspool())]
     log.info('Telegram signed webhook and SMS polling worker started')
     try:
         yield
