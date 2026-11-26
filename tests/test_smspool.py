@@ -19,7 +19,9 @@ async def test_smspool_catalogue_and_refund(monkeypatch):
         if request.url.path == '/service/retrieve_all':
             return httpx.Response(200, json=[{'ID':'8','name':'Discord'}])
         if request.url.path == '/sms/stock':
-            return httpx.Response(200, json={'stock': 4, 'price':'0.25'})
+            return httpx.Response(200, json={'amount': 4, 'success': 1})
+        if request.url.path == '/request/price':
+            return httpx.Response(200, json={'price':'0.25','high_price':'0.25','pool':7})
         if request.url.path == '/sms/check':
             return httpx.Response(200, json={'status':6})
         raise AssertionError(request.url.path)

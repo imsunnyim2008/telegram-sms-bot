@@ -37,6 +37,7 @@ class SMSPool:
         self._cache = []
         self._cached_at = None
         self._lock = asyncio.Lock()
+        self._service_ids = {}
 
     async def _request(self, path, *, method='POST', data=None, purchase=False):
         if not settings.smspool_api_key:
@@ -47,6 +48,10 @@ class SMSPool:
                          'Accept': 'application/json'})
             if not 200 <= response.status_code < 300:
                 if purchase:
+                    if response.status_code == 422:
+                        error = response.json()
+                        if isinstance(error, dict) and error.get('success') == 0 and error.get('type') in {'OUT_OF_STOCK', 'BALANCE_ERROR', 'PRICE_NOT_FOUND'}:
+                            raise ProviderError('SMSPool declined purchase')
                     raise AmbiguousPurchase('SMSPool purchase response uncertain')
                 raise ProviderError(f'SMSPool HTTP {response.status_code}')
             return response.json()
@@ -79,35 +84,44 @@ class SMSPool:
                 if not isinstance(row, dict):
                     continue
                 name = str(row.get('name', '')).strip().lower()
+                name = {'amazon / amazon web services': 'amazon', 'google / gmail': 'google', 'microsoft / outlook': 'microsoft'}.get(name, name)
                 ident = str(row.get('ID', row.get('id', '')))
                 if name in wanted and SLUG.fullmatch(name) and ident.isdigit() and settings.service_allowed(name):
                     services[name] = ident
             if not services:
                 raise ProviderError('No configured SMSPool services in catalogue')
-            sem = asyncio.Semaphore(5)
+            self._service_ids = services
+            log.info('SMSPool catalogue: %s permitted service IDs', len(services))
+            sem = asyncio.Semaphore(4)
             async def quote(service, ident, country):
                 async with sem:
                     try:
+                        params = {'country': country.upper(), 'service': ident}
+                        # SMSPool's stock response uses amount, not count.
                         data = await self._request('/sms/stock', data={
-                            'country': country.upper(), 'service': ident, 'include_price': '1'})
-                        if not isinstance(data, dict):
+                            **params, 'key': settings.smspool_api_key})
+                        if not isinstance(data, dict) or str(data.get('success', 1)) != '1':
                             return None, False
-                        # Do not invent a price or availability. Only accept an explicit
-                        # positive stock quantity and quoted monetary amount.
-                        stock = data.get('stock', data.get('count'))
-                        price = data.get('price', data.get('cost'))
+                        stock = data.get('amount', data.get('stock', data.get('count')))
                         if stock is None:
+                            log.warning('SMSPool stock response missing quantity; fields=%s',
+                                        sorted(k for k in data if k in {'amount','stock','count','success','price','cost','message'}))
                             return None, False
                         quantity = int(stock)
                         if quantity <= 0:
                             return None, True
-                        if price is None:
+                        # Pricing has its own documented endpoint.
+                        pricing = await self._request('/request/price', data={
+                            **params, 'skip_success_rate': '1', 'key': settings.smspool_api_key})
+                        if not isinstance(pricing, dict) or 'price' not in pricing:
                             return None, False
-                        cost = money(price)
+                        cost = money(pricing['price'])
                         if cost <= 0:
                             return None, False
                         return PriceItem(service, country, cost, quantity), True
-                    except (ProviderError, TypeError, ValueError, ArithmeticError):
+                    except (ProviderError, TypeError, ValueError, ArithmeticError) as exc:
+                        if isinstance(exc, ProviderError):
+                            log.warning('SMSPool stock/price lookup failed: %s', str(exc))
                         return None, False
             results = await asyncio.gather(*(quote(s, ident, c) for s, ident in services.items()
                 for c in COUNTRIES if settings.country_allowed(c)))
@@ -126,7 +140,7 @@ class SMSPool:
         if cap <= 0:
             raise ProviderError('Invalid SMSPool price cap')
         data = await self._request('/purchase/sms', data={
-            'country': country.upper(), 'service': service, 'max_price': str(cap),
+            'country': country.upper(), 'service': self._service_ids.get(service, service), 'max_price': str(cap),
             'quantity': '1'}, purchase=True)
         if isinstance(data, dict) and str(data.get('success')) == '0':
             if data.get('type') in {'OUT_OF_STOCK', 'BALANCE_ERROR', 'PRICE_NOT_FOUND'}:
