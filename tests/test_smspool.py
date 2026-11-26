@@ -1,5 +1,6 @@
 import httpx
 import pytest
+from types import SimpleNamespace
 from decimal import Decimal
 
 from app.config import settings
@@ -10,7 +11,7 @@ from app.provider import AmbiguousPurchase
 @pytest.mark.asyncio
 async def test_smspool_catalogue_and_refund(monkeypatch):
     monkeypatch.setattr(settings, 'smspool_api_key', 'test-only')
-    monkeypatch.setattr('app.smspool.time.monotonic', lambda: 10.0)
+    monkeypatch.setattr('app.smspool.time', SimpleNamespace(monotonic=lambda: 10.0))
     monkeypatch.setattr(settings, 'allowed_services', 'discord')
     monkeypatch.setattr(settings, 'allowed_countries', 'us')
     def respond(request):
