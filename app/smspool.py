@@ -48,6 +48,7 @@ class SMSPool:
                          'Accept': 'application/json'})
             if not 200 <= response.status_code < 300:
                 if purchase:
+                    log.warning('SMSPool purchase rejected or uncertain: HTTP %s', response.status_code)
                     if response.status_code == 422:
                         error = response.json()
                         if isinstance(error, dict) and error.get('success') == 0 and error.get('type') in {'OUT_OF_STOCK', 'BALANCE_ERROR', 'PRICE_NOT_FOUND'}:
@@ -57,6 +58,7 @@ class SMSPool:
             return response.json()
         except (httpx.RequestError, ValueError) as exc:
             if purchase:
+                log.warning('SMSPool purchase response unavailable: %s', type(exc).__name__)
                 raise AmbiguousPurchase('SMSPool purchase response uncertain') from exc
             raise ProviderError('SMSPool request unavailable') from exc
 
@@ -145,6 +147,7 @@ class SMSPool:
         if isinstance(data, dict) and str(data.get('success')) == '0':
             if data.get('type') in {'OUT_OF_STOCK', 'BALANCE_ERROR', 'PRICE_NOT_FOUND'}:
                 raise ProviderError('SMSPool declined purchase')
+            log.warning('SMSPool purchase returned an unclassified failure; manual review required')
             raise AmbiguousPurchase('Unclassified SMSPool purchase response')
         try:
             if str(data['success']) != '1':
@@ -156,6 +159,7 @@ class SMSPool:
             expires = datetime.fromtimestamp(int(data['expiration']), tz=timezone.utc).isoformat()
             return {'id': oid, 'phone': phone, 'price': price, 'expires': expires}
         except (KeyError, TypeError, ValueError, OverflowError, OSError, ProviderError) as exc:
+            log.warning('SMSPool allocation response validation failed: %s', type(exc).__name__)
             raise AmbiguousPurchase('SMSPool allocation requires reconciliation') from exc
 
     async def check(self, order_id):
