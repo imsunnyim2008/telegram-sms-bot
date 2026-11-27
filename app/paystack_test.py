@@ -35,7 +35,9 @@ class PaystackTest:
         except (httpx.HTTPError, ValueError, TypeError, AttributeError) as exc:
             raise PaystackError('Paystack request failed; do not credit or retry initialization blindly') from exc
 
-    async def initialize(self, email: str, kobo: int, reference: str):
+    async def initialize(self, email: str, kobo: int, reference: str, *, channel: str | None = None):
+        if channel not in (None, 'card', 'bank_transfer'):
+            raise PaystackError('Unsupported payment method')
         if (not isinstance(kobo, int) or isinstance(kobo, bool) or not 50000 <= kobo <= 100000000
                 or not REF.fullmatch(reference)
                 or not re.fullmatch(r'[^\s@]+@[^\s@]+\.[^\s@]+', email)
@@ -43,7 +45,7 @@ class PaystackTest:
             raise PaystackError('Invalid test checkout details')
         data = await self._request('POST', '/transaction/initialize', json={
             'email': email, 'amount': kobo, 'currency': 'NGN', 'reference': reference,
-            'channels': ['card', 'bank_transfer'],
+            'channels': [channel] if channel else ['card', 'bank_transfer'],
         })
         url = data.get('authorization_url', '')
         parsed = urlparse(url)
