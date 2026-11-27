@@ -55,6 +55,9 @@ class TextVerifiedSms:
         self._token_until = 0.0
         self._auth_lock = asyncio.Lock()
         self._price_lock = asyncio.Lock()
+        self._catalogue_lock = asyncio.Lock()
+        self._catalogue = None
+        self._catalogue_at = 0.0
         self._cache: list[PriceItem] = []
         self._cached_at = 0.0
         # Order ID -> exact destination number; recorded after confirmed buy.
@@ -135,6 +138,27 @@ class TextVerifiedSms:
             if purchase:
                 raise AmbiguousPurchase("TextVerified purchase response unclear") from exc
             raise ProviderError("TextVerified returned invalid JSON") from exc
+
+    async def catalogue_names(self) -> list[str]:
+        """Search the complete SMS catalogue without requesting thousands of quotes."""
+        async with self._catalogue_lock:
+            now = time.monotonic()
+            if self._catalogue is not None and now - self._catalogue_at < 300:
+                return list(self._catalogue)
+            data = await self._request("GET", "/api/pub/v2/services",
+                params={"numberType": "mobile", "reservationType": "verification"})
+            if not isinstance(data, list):
+                raise ProviderError("TextVerified service catalogue unavailable")
+            names = {row["serviceName"].strip().lower()
+                     for row in data if isinstance(row, dict)
+                     and isinstance(row.get("serviceName"), str)
+                     and 0 < len(row["serviceName"].strip()) <= 100
+                     and row["serviceName"].isprintable()
+                     and str(row.get("capability", "")).lower() in
+                         {"sms", "smsandvoicecombo"}}
+            self._catalogue = sorted(names)
+            self._catalogue_at = now
+            return list(self._catalogue)
 
     async def get_prices(self, *, fresh: bool = False) -> list[PriceItem]:
         if not fresh and self._cache and time.monotonic() - self._cached_at < 60:

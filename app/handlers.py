@@ -2304,29 +2304,53 @@ async def prompt_service_search(target, uid, *, edit=False):
         keyboard([[('⬅️ Main menu', 'menu:home')]]), edit=edit)
 
 
-def matching_service_names(offers, query):
+def catalogue_matches(names, query):
     query = query.strip().casefold()
-    names = {p.service for p in offers if p.stock > 0 and settings.service_allowed(p.service)}
-    exact = sorted(name for name in names if name.casefold() == query)
-    return exact or sorted(name for name in names if query in name.casefold())[:15]
+    return sorted({name for name in names if query in name.casefold()},
+                  key=lambda name: (name.casefold() != query, name.casefold()))
 
 
 async def search_service(target, uid, query):
     if not 2 <= len(query.strip()) <= 50:
         return await target.answer('Enter a service name (2–50 characters).')
     try:
-        offers = await shop.provider.get_prices()
+        provider = shop.provider
+        if hasattr(provider, 'catalogue_names'):
+            names = await provider.catalogue_names()
+        else:
+            names = [p.service for p in await provider.get_prices()]
     except Exception:
-        return await target.answer('Live service information is temporarily unavailable. Try again.')
-    matches = matching_service_names(offers, query)
+        return await target.answer('Live catalogue temporarily unavailable. Try again.')
+    matches = catalogue_matches(names, query)
     if not matches:
-        return await target.answer('No matching enabled service is currently in stock. Enter another name.')
-    await clear_flow(uid)
-    if len(matches) == 1:
-        return await countries(target, matches[0], viewer_id=uid)
-    await show_selection_menu(target, 'Matching services — select the one you want:',
-        keyboard([[(name.title(), f'countries:{name}:0')] for name in matches]
-                 + [[('🔎 Search again', 'services:0'), ('⬅️ Main menu', 'menu:home')]]))
+        return await target.answer('No matching service found in the provider catalogue. Enter another name.')
+    exact = next((name for name in matches if name.casefold() == query.strip().casefold()), None)
+    if exact or len(matches) == 1:
+        name = exact or matches[0]
+        if not settings.service_allowed(name):
+            return await target.answer(f'{name.title()} is listed in the provider catalogue, but purchasing is not enabled in Friday. Price and stock are not confirmed. Enter another name.')
+        try:
+            offers = await provider.get_prices()
+        except Exception:
+            return await target.answer('Live price and stock are temporarily unavailable. Try again.')
+        if not any(p.service == name and p.stock > 0 for p in offers):
+            return await target.answer(f'{name.title()} is listed, but no live offer is currently confirmed. Enter another name.')
+        await clear_flow(uid)
+        return await countries(target, name, viewer_id=uid)
+    # Keep the input active. Return all matches in readable batches, without
+    # generating purchase buttons for services outside the approved list.
+    rows = [name.title() for name in matches]
+    for offset in range(0, len(rows), 60):
+        chunk = rows[offset:offset+60]
+        # Bound Telegram messages even for long catalogue names.
+        body = 'Matching services — type the exact name:\n'
+        for label in chunk:
+            if len(body) + len(label) + 1 > 3500:
+                await target.answer(body, parse_mode=None)
+                body = ''
+            body += label + '\n'
+        if body:
+            await target.answer(body, parse_mode=None)
 
 
 @router.message(Command('findservice'))
