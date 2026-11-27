@@ -1,5 +1,6 @@
 """Crash-resumable polling: every outstanding order is recovered from PostgreSQL."""
 import asyncio
+from aiogram.types import InlineKeyboardButton, InlineKeyboardMarkup
 import logging
 import time
 from datetime import timedelta, timezone
@@ -294,8 +295,10 @@ class Worker:
                     user_id,
                     f'🔐 Your verification code for order #{aid}: {escape(str(code))}\n'
                     f'App: {app_label_html(service)}\n'
-                    f'After using the code, confirm with /done {aid}.',
+                    'After completing your authorized verification, tap Done below.',
                     parse_mode='HTML',
+                    reply_markup=InlineKeyboardMarkup(inline_keyboard=[[
+                        InlineKeyboardButton(text='✅ Done', callback_data=f'done:{aid}')]]),
                 )
             except Exception:
                 # Keep received state so we can retry notification after a restart.

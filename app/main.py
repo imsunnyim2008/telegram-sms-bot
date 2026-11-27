@@ -50,17 +50,17 @@ class TelegramNotifier:
     def __init__(self, bot):
         self.bot = bot
 
-    async def send(self, user_id: int, message: str, *, parse_mode: str | None = None):
+    async def send(self, user_id: int, message: str, *, parse_mode: str | None = None, reply_markup=None):
         # Never print phone numbers or verification codes in logs.
         try:
-            await self.bot.send_message(user_id, message, parse_mode=parse_mode)
+            await self.bot.send_message(user_id, message, parse_mode=parse_mode, reply_markup=reply_markup)
         except TelegramBadRequest as exc:
             if parse_mode != "HTML" or not custom_emoji_unavailable(exc):
                 raise
             # Only retry if the custom-emoji entity was rejected (e.g. bot
             # owner lacks Premium). Retain the app name, never send false logos.
             await self.bot.send_message(user_id, without_custom_emoji(message),
-                                        parse_mode=None)
+                                        parse_mode=None, reply_markup=reply_markup)
 
 
     async def send_api_alert(self, user_id, message, incident):

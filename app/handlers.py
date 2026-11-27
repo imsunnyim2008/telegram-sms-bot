@@ -16,6 +16,7 @@ from aiogram.types import CallbackQuery, CopyTextButton, InlineKeyboardButton, I
 from sqlalchemy import String, cast, func, select
 
 from .business import BotError
+from .reference_catalogue import reference_names
 from .config import settings
 from .country_ui import arrange_country_offers, country_flag
 from .command_menu import PUBLIC_HELP, ADMIN_HELP
@@ -1321,8 +1322,10 @@ async def mark_customer_done(message, uid: int, aid: int):
         key = f'customer_done:{aid}'
         if await s.get(Setting, key) is None:
             s.add(Setting(key=key, value=utcnow().isoformat()))
-    await message.answer(f'✅ Order #{aid}: verification marked done by you. '
-                         'This is a customer confirmation, not confirmation from the destination app.')
+    await message.answer(f'✅ Order #{aid}: verification marked done by you.\n\n'
+                         'Your confirmation has been saved. Thank you for using FRIDAY!\n'
+                         'The destination app has not independently confirmed success.',
+                         reply_markup=keyboard([[('⬅️ Main menu', 'menu:home')]]))
 
 
 @router.message(Command('support'))
@@ -2326,14 +2329,16 @@ def catalogue_matches(names, query):
 async def search_service(target, uid, query):
     if not 2 <= len(query.strip()) <= 50:
         return await target.answer('Enter a service name (2–50 characters).')
+    provider = shop.provider
     try:
-        provider = shop.provider
         if hasattr(provider, 'catalogue_names'):
-            names = await provider.catalogue_names()
+            live_names = await provider.catalogue_names()
         else:
-            names = [p.service for p in await provider.get_prices()]
+            live_names = [p.service for p in await provider.get_prices()]
     except Exception:
-        return await target.answer('Live catalogue temporarily unavailable. Try again.')
+        live_names = []
+    live_names = set(live_names)
+    names = sorted(live_names | set(reference_names()))
     matches = catalogue_matches(names, query)
     if not matches:
         suggestions = get_close_matches(query.strip().casefold(), names, n=3, cutoff=0.7)
@@ -2343,8 +2348,10 @@ async def search_service(target, uid, query):
     exact = next((name for name in matches if name.casefold() == query.strip().casefold()), None)
     if exact or len(matches) == 1:
         name = exact or matches[0]
+        if name not in live_names:
+            return await target.answer(f'{name.title()} — found in reference catalogue. Live provider listing not confirmed; no purchase available. Enter another name.', parse_mode=None)
         if not settings.service_allowed(name):
-            return await target.answer(f'{name.title()} is listed in the provider catalogue, but purchasing is not enabled in Friday. Price and stock are not confirmed. Enter another name.')
+            return await target.answer(f'{name.title()} — found in live catalogue. Purchasing is not enabled in Friday. Price and stock are not confirmed. Enter another name.', parse_mode=None)
         try:
             offers = await provider.get_prices()
         except Exception:
