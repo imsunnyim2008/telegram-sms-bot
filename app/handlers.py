@@ -317,7 +317,7 @@ async def callbacks(callback: CallbackQuery):
                 '🟢 FINAL CONFIRMATION\n\n'
                 f'Service: {service.title()}\nCountry: {country_flag(selected_country)} {selected_country}\n'
                 f'Available: {item.stock}\n{price_label}: {charge} {settings.wallet_currency}\n'
-                funding_note,
+                + funding_note,
                 reply_markup=keyboard([[('✅ Confirm purchase', f'buy:{service}:{country}')],
                                        [('⬅️ Back', f'countries:{service}:0')]]),
             )
