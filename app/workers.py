@@ -135,7 +135,8 @@ class Worker:
 
         balance, catalogue = await asyncio.gather(
             probe(self.shop.provider.get_balance),
-            probe(lambda: self.shop.provider.get_prices(fresh=True)),
+            probe(self.shop.provider.catalogue_names if hasattr(self.shop.provider, 'service_prices')
+                  else lambda: self.shop.provider.get_prices(fresh=True)),
         )
         await observe(Session, balance and catalogue, utcnow().timestamp())
         for notice in await pending_notices(Session):

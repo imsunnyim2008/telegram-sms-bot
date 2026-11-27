@@ -460,7 +460,9 @@ async def countries(target, service: str, page: int = 0, *, edit: bool = False,
         viewer_id = getattr(getattr(target, 'from_user', None), 'id', None)
     if not settings.service_allowed(service):
         raise BotError('Service disabled')
-    items = [x for x in await shop.provider.get_prices() if x.service == service]
+    provider = shop.provider
+    offers = await (provider.service_prices(service) if hasattr(provider, 'service_prices') else provider.get_prices())
+    items = [x for x in offers if x.service == service]
     country_names = (await shop.provider.get_country_names()
                      if hasattr(shop.provider, 'get_country_names') else {})
     # The five preferred countries ALWAYS occupy the first five slots.
@@ -2427,9 +2429,10 @@ async def service_details(target, uid, name, live_names, *, edit=False):
         status = 'Listed by provider. Purchasing is not enabled for this service.'
     else:
         try:
-            offers = await shop.provider.get_prices()
+            provider = shop.provider
+            offers = await (provider.service_prices(name) if hasattr(provider, 'service_prices') else provider.get_prices())
         except Exception:
-            status = 'Live pricing and stock are temporarily unavailable.'
+            status = 'Live pricing and stock are temporarily unavailable. The provider may be limiting requests. Please retry later.'
         else:
             if any(p.service == name and p.stock > 0 for p in offers):
                 await clear_flow(uid)

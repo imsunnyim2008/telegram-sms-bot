@@ -109,8 +109,8 @@ class Shop:
                     user_id: int | None = None) -> tuple[PriceItem, Decimal]:
         if not settings.service_allowed(service) or not settings.country_allowed(country):
             raise BotError('This selection is not available')
-        item = next((i for i in await self.provider.get_prices()
-                     if i.service == service and i.country == country), None)
+        offers = await (self.provider.service_prices(service) if hasattr(self.provider, 'service_prices') else self.provider.get_prices())
+        item = next((i for i in offers if i.service == service and i.country == country), None)
         if not item:
             raise BotError('No numbers in stock for this selection')
         return item, await self.price(item, user_id=user_id)

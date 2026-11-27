@@ -10,6 +10,7 @@ import re
 import time
 import uuid
 from datetime import datetime, timezone
+from email.utils import parsedate_to_datetime
 from decimal import Decimal, InvalidOperation
 from urllib.parse import urlparse
 
@@ -54,6 +55,9 @@ class TextVerifiedSms:
         self._token: str | None = None
         self._token_until = 0.0
         self._auth_lock = asyncio.Lock()
+        self._request_lock = asyncio.Lock()
+        self._retry_until = 0.0
+        self._service_cache = {}
         self._price_lock = asyncio.Lock()
         self._catalogue_lock = asyncio.Lock()
         self._catalogue = None
@@ -70,12 +74,28 @@ class TextVerifiedSms:
             raise ProviderError("TextVerified API username/key not configured")
         return settings.textverified_api_username, settings.textverified_api_key
 
+    def _check_cooldown(self):
+        if time.monotonic() < self._retry_until:
+            raise ProviderError('TextVerified request deferred (HTTP 429)')
+
+    def _record_limit(self, response):
+        retry = response.headers.get('Retry-After', '')
+        try:
+            delay = float(retry)
+        except ValueError:
+            try:
+                delay = (parsedate_to_datetime(retry) - datetime.now(timezone.utc)).total_seconds()
+            except (ValueError, TypeError, OverflowError):
+                delay = 60
+        self._retry_until = max(self._retry_until, time.monotonic() + max(60, delay))
+
     async def _auth(self) -> str:
         if self._token and time.monotonic() < self._token_until:
             return self._token
         async with self._auth_lock:
             if self._token and time.monotonic() < self._token_until:
                 return self._token
+            self._check_cooldown()
             username, key = self._credentials()
             try:
                 response = await self.client.post(
@@ -84,6 +104,8 @@ class TextVerifiedSms:
                 )
             except httpx.RequestError as exc:
                 raise ProviderError("TextVerified authentication network error") from exc
+            if response.status_code == 429:
+                self._record_limit(response)
             if response.status_code != 200:
                 raise ProviderError(f"TextVerified authentication failed (HTTP {response.status_code})")
             try:
@@ -112,6 +134,7 @@ class TextVerifiedSms:
 
     async def _request(self, method: str, path: str, *, payload: dict | None = None,
                        params: dict | None = None, purchase: bool = False):
+        self._check_cooldown()
         token = await self._auth()
         headers = {"Authorization": f"Bearer {token}", "Accept": "application/json"}
         if purchase:
@@ -119,9 +142,13 @@ class TextVerifiedSms:
             headers["Idempotency-Key"] = uuid.uuid4().hex
         safe_path = self._safe_path(path)
         try:
-            response = await self.client.request(
-                method, BASE + safe_path, headers=headers, json=payload, params=params,
-            )
+            async with self._request_lock:
+                self._check_cooldown()
+                response = await self.client.request(
+                    method, BASE + safe_path, headers=headers, json=payload, params=params,
+                )
+                if response.status_code == 429:
+                    self._record_limit(response)
         except httpx.RequestError as exc:
             if purchase:
                 raise AmbiguousPurchase("TextVerified purchase outcome uncertain") from exc
@@ -160,71 +187,46 @@ class TextVerifiedSms:
             self._catalogue_at = now
             return list(self._catalogue)
 
-    async def get_prices(self, *, fresh: bool = False) -> list[PriceItem]:
-        if not fresh and self._cache and time.monotonic() - self._cached_at < 60:
-            return self._cache
+    async def service_prices(self, service: str, *, fresh: bool = False) -> list[PriceItem]:
+        if not settings.country_allowed(US) or not SLUG.fullmatch(service) or not settings.service_allowed(service):
+            return []
         async with self._price_lock:
-            if not fresh and self._cache and time.monotonic() - self._cached_at < 60:
-                return self._cache
-            if not settings.country_allowed(US):
+            self._check_cooldown()
+            cached = self._service_cache.get(service)
+            if not fresh and cached and time.monotonic() - cached[0] < 60:
+                return cached[1]
+            if service not in await self.catalogue_names():
                 return []
-            data = await self._request(
-                "GET", "/api/pub/v2/services",
-                params={"numberType": "mobile", "reservationType": "verification"},
-            )
-            if not isinstance(data, list):
-                raise ProviderError("TextVerified service catalogue unavailable")
-            allowed = {}
-            for row in data:
-                if (not isinstance(row, dict) or
-                        str(row.get("capability", "")).lower() not in
-                        {"sms", "smsandvoicecombo"}):
-                    continue
-                name = str(row.get("serviceName", "")).lower()
-                if SLUG.fullmatch(name) and settings.service_allowed(name):
-                    allowed[name] = True
-
-            sem = asyncio.Semaphore(4)
-            failures = 0
-
-            async def quote(service):
-                nonlocal failures
-                async with sem:
-                    request = {"serviceName": service, "capability": "sms",
-                               "numberType": "mobile"}
-                    stage = 'inventory'
-                    try:
-                        inventory = await self._request(
-                            "POST", "/api/pub/v2/inventory/verifications",
-                            payload=request,
-                        )
-                        qty = int(inventory["availableQuantity"])
-                        if qty <= 0:
-                            return None
-                        stage = 'pricing'
-                        pricing = await self._request(
-                            "POST", "/api/pub/v2/pricing/verifications",
-                            payload={**request, "areaCode": False, "carrier": False},
-                        )
-                        cost = _decimal(pricing["price"])
-                        if cost == 0:
-                            return None
-                        return PriceItem(service, US, cost, qty)
-                    except (ProviderError, ValueError, TypeError, KeyError) as exc:
-                        failures += 1
-                        # Never log provider bodies, phone numbers, tokens or raw errors.
-                        status = re.search(r'HTTP (\d{3})', str(exc)) if isinstance(exc, ProviderError) else None
-                        log.warning('TextVerified quote unavailable: service=%s stage=%s reason=%s',
-                                    service, stage, status.group(1) if status else type(exc).__name__)
-                        return None
-
-            found = await asyncio.gather(*(quote(s) for s in sorted(allowed)))
-            if allowed and failures == len(allowed):
-                raise ProviderError('TextVerified inventory/pricing requests all failed')
-            offers = [p for p in found if p is not None]
-            self._cache = offers
-            self._cached_at = time.monotonic()
+            request = {"serviceName": service, "capability": "sms", "numberType": "mobile"}
+            inventory = await self._request("POST", "/api/pub/v2/inventory/verifications",
+                                            payload=request)
+            try:
+                qty = int(inventory["availableQuantity"])
+                offers = []
+                if qty > 0:
+                    pricing = await self._request("POST", "/api/pub/v2/pricing/verifications",
+                        payload={**request, "areaCode": False, "carrier": False})
+                    cost = _decimal(pricing["price"])
+                    if cost > 0:
+                        offers = [PriceItem(service, US, cost, qty)]
+            except (ValueError, TypeError, KeyError) as exc:
+                raise ProviderError("TextVerified quote response invalid") from exc
+            self._service_cache[service] = (time.monotonic(), offers)
             return offers
+
+    async def get_prices(self, *, fresh: bool = False) -> list[PriceItem]:
+        # Explicit bulk views only. Stop at provider throttling, never treat it as zero stock.
+        names = [name for name in await self.catalogue_names()
+                 if SLUG.fullmatch(name) and settings.service_allowed(name)]
+        offers = []
+        for name in names:
+            try:
+                offers.extend(await self.service_prices(name, fresh=fresh))
+            except ProviderError:
+                if time.monotonic() < self._retry_until:
+                    raise
+                log.warning("TextVerified quote unavailable: service=%s", name)
+        return offers
 
     async def catalogue_capabilities(self) -> dict[str, int | None]:
         """Read-only catalogue availability, not purchase eligibility or stock."""
@@ -262,7 +264,7 @@ class TextVerifiedSms:
         if _decimal(raw_max_price) <= 0:
             raise ProviderError("Invalid maximum price")
         # Reconfirm that service is in the catalogue/stock before charging.
-        if not any(i.service == service for i in await self.get_prices()):
+        if not any(i.service == service for i in await self.service_prices(service)):
             raise ProviderError("Service no longer available")
         creation = await self._request(
             "POST", "/api/pub/v2/verifications",
