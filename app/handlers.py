@@ -3,6 +3,7 @@ import asyncio
 import json
 import logging
 import time
+from difflib import get_close_matches
 from secrets import token_hex
 from datetime import timedelta, timezone
 from decimal import Decimal, InvalidOperation
@@ -287,6 +288,9 @@ async def callbacks(callback: CallbackQuery):
             await button_action(callback, uid, data[3:])
         elif data.startswith('services:'):
             await prompt_service_search(callback.message, uid, edit=True)
+        elif data in ('planinfo:rental', 'planinfo:renewable'):
+            label = 'Fixed-term rental' if data == 'planinfo:rental' else 'Monthly renewable rental'
+            await callback.message.answer(f'{label} is not available for purchase in FRIDAY yet. No payment was taken. Pricing and eligibility must be confirmed before launch.')
         elif data.startswith('countries:'):
             flow = await read_flow(uid)
             if flow and flow.get('type') == 'service_search':
@@ -470,12 +474,21 @@ async def countries(target, service: str, page: int = 0, *, edit: bool = False,
         nav.append(('Next ➡️', f'countries:{service}:{page+1}'))
     if nav:
         rows.append(nav)
-    rows.append([('🔎 Search another service', 'services:0'), ('⬅️ Main menu', 'menu:home')])
-    await show_selection_menu(target, f'📱 {service.title()}\\n'
-                              'Plan: One-time\\n'
-                              'Available countries, current prices and stock:\\n'
-                              'Select an available country to review the order.',
-                              keyboard(rows), edit=edit)
+    rows.append([('📅 Rental — unavailable', 'planinfo:rental')])
+    rows.append([('🔄 Monthly — unavailable', 'planinfo:renewable')])
+    rows.append([('🔎 Search again', 'services:0')])
+    rows.append([('⬅️ Main menu', 'menu:home')])
+    await show_selection_menu(
+        target,
+        f'📱 {service.title()}\n\n'
+        'Choose your number plan:\n\n'
+        '⏳ ONE-TIME — short-term access for an authorized verification. '
+        'Select a country below to see your final quote.\n\n'
+        '📅 RENTAL — fixed-term number access (not enabled).\n\n'
+        '🔄 MONTHLY — renewable number access (not enabled).\n\n'
+        'One-time offers: country • price • stock',
+        keyboard(rows), edit=edit)
+
 
 # The last step of a pricing or wallet wizard survives Render restarts.
 # Never keep prices or financial flows only in an in-memory dict.
@@ -2323,6 +2336,9 @@ async def search_service(target, uid, query):
         return await target.answer('Live catalogue temporarily unavailable. Try again.')
     matches = catalogue_matches(names, query)
     if not matches:
+        suggestions = get_close_matches(query.strip().casefold(), names, n=3, cutoff=0.7)
+        if suggestions:
+            return await target.answer('No exact match. Did you mean: ' + ', '.join(suggestions) + '? Type the service name to continue.', parse_mode=None)
         return await target.answer('No matching service found in the provider catalogue. Enter another name.')
     exact = next((name for name in matches if name.casefold() == query.strip().casefold()), None)
     if exact or len(matches) == 1:
