@@ -1827,7 +1827,7 @@ async def deposit_receipt(target, uid, pid):
             return await target.answer('Deposit not found.')
     if row.gateway == 'paystack' and row.status == 'created':
         try:
-            await paystack.settle(row.gateway_invoice_id)
+            await paystack.settle(row.gateway_invoice_id, notifier=shop.notifier)
         except Exception:
             return await target.answer('Paystack verification is temporarily unavailable. No new charge was made.')
         async with Session() as s:
@@ -2574,7 +2574,8 @@ async def handle_pending_text(message: Message):
         except PaystackError:
             return await message.answer('Checkout could not be confirmed. Open My deposits or contact support before retrying.')
         return await message.answer(f'Paystack deposit #{pid}: ₦{ngn} → ${credit}. Pay only through the secure checkout.',
-            reply_markup=InlineKeyboardMarkup(inline_keyboard=[[InlineKeyboardButton(text='Pay with Paystack', url=url)]]))
+            reply_markup=InlineKeyboardMarkup(inline_keyboard=[[InlineKeyboardButton(text='Pay with Paystack', url=url)],
+                [InlineKeyboardButton(text='✅ Verify my payment', callback_data=f'ui:depositreceipt:{pid}')]]))
     if flow.get('type') == 'service_search':
         if await private_customer(message):
             return await search_service(message, uid, raw)

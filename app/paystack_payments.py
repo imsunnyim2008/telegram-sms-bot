@@ -79,7 +79,7 @@ async def create_deposit(uid, raw, email, *, gateway=None):
     return pid, url, ngn, credit
 
 
-async def settle(reference, *, gateway=None):
+async def settle(reference, *, gateway=None, notifier=None):
     # Existing payments may be reconciled even when new checkout is paused.
     if not settings.paystack_secret_key.startswith('sk_live_') or not re.fullmatch(r'friday-[0-9a-f]{32}', reference):
         return False
@@ -106,4 +106,12 @@ async def settle(reference, *, gateway=None):
         await apply(s, row.user_id, row.amount_credit, 'topup', 'payment', str(pid))
         row.status = 'paid'
         row.paid_at = utcnow()
-        return True
+        uid, pid, ngn, credit = row.user_id, row.id, row.amount_fiat, row.amount_credit
+    if notifier is not None:
+        try:
+            await notifier.send(uid, f'✅ Top up successful!\n\nDeposit #{pid}\nAmount paid: ₦{ngn:.2f}\nWallet credited: ${credit:.4f}\nPayment method: Paystack\nThank you for using FRIDAY!')
+        except Exception:
+            # Settlement is already committed. Never repeat wallet credit for a notification failure.
+            import logging
+            logging.getLogger(__name__).warning('Paystack deposit credited; notification unavailable')
+    return True
