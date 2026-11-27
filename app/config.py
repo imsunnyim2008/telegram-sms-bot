@@ -20,6 +20,11 @@ class Config(BaseSettings):
     live_purchases_enabled: bool = False
     wallet_currency: str = 'USD'
     provider_price_to_wallet: Decimal = Decimal('0')
+    paystack_secret_key: str = ''
+    paystack_webhook_secret: str = ''
+    paystack_enabled: bool = False
+    paystack_admin_only: bool = True
+    paystack_ngn_per_usd: Decimal = Decimal('0')
     payment_provider: str = 'cryptobot'
     payment_api_key: str = ''
     nowpayments_api_key: str = ''

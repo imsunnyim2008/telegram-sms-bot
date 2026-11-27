@@ -65,8 +65,9 @@ class PaystackTest:
 
 
 def verify_signature(raw: bytes, legacy: str, modern: str, *, test_key: str,
-                     signing_secret: str = '', now: int | None = None) -> bool:
-    if len(raw) > 65536 or not test_key.startswith('sk_test_'):
+                     signing_secret: str = '', now: int | None = None,
+                     mode: str = 'test') -> bool:
+    if len(raw) > 65536 or mode not in ('test', 'live') or not test_key.startswith(f'sk_{mode}_'):
         return False
     if modern:
         if not signing_secret.startswith('whsec_'):

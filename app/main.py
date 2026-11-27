@@ -19,6 +19,8 @@ from .config import settings
 from .db import engine, init_db, Session, TelegramUpdateReceipt
 from .gateway import CryptoBot
 from .nowpayments import NowPayments
+from . import paystack_payments as paystack
+from .paystack_test import PaystackError
 from .pricing_web import router as pricing_router
 from .handlers import router, set_shop
 from .command_menu import register_native_menu
@@ -403,3 +405,42 @@ async def moniepoint_webhook(request: Request):
 @web.get('/webhook/moniepoint')
 async def moniepoint_webhook_info():
     return {'service': 'Moniepoint webhook pilot', 'method': 'POST', 'automatic_credit': False}
+
+
+@web.get('/paystack/callback')
+async def paystack_callback():
+    # A browser redirect is not proof of payment and never credits an account.
+    return {'message': 'Return to FRIDAY and check My deposits. Only verified payments are credited.'}
+
+
+@web.post('/webhook/paystack')
+async def paystack_webhook(request: Request):
+    if not settings.paystack_secret_key.startswith('sk_live_'):
+        raise HTTPException(status_code=503, detail='Paystack not configured')
+    body = bytearray()
+    async for chunk in request.stream():
+        body.extend(chunk)
+        if len(body) > 65536:
+            raise HTTPException(status_code=413, detail='Payload too large')
+    raw = bytes(body)
+    if not paystack.verify_signature(raw, request.headers.get('x-paystack-signature', ''),
+            request.headers.get('paystack-signature', ''), test_key=settings.paystack_secret_key,
+            signing_secret=settings.paystack_webhook_secret, mode='live'):
+        raise HTTPException(status_code=401, detail='Invalid signature')
+    try:
+        event = json.loads(raw)
+        if not isinstance(event, dict):
+            raise ValueError()
+        if event.get('event') != 'charge.success':
+            return {'ok': True}
+        reference = event['data']['reference']
+        if not isinstance(reference, str):
+            raise ValueError()
+    except (ValueError, TypeError, KeyError):
+        raise HTTPException(status_code=400, detail='Invalid event')
+    try:
+        # Acknowledge only after atomic settlement; provider retries on temporary failure.
+        await paystack.settle(reference)
+    except Exception:
+        raise HTTPException(status_code=503, detail='Payment verification unavailable')
+    return {'ok': True}
