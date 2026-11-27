@@ -26,7 +26,7 @@ async def test_live_credit_once_with_mock(setup_database, monkeypatch):
         if request.method == 'POST':
             body = json.loads(request.content)
             state['reference'] = body['reference']
-            assert body['channels'] == ['card']
+            assert body['channels'] == ['card', 'bank_transfer']
             return httpx.Response(200, json={'status':True,'data':{
                 'reference':body['reference'],'authorization_url':'https://checkout.paystack.com/demo'}})
         return httpx.Response(200, json={'status':True,'data':{
@@ -34,7 +34,7 @@ async def test_live_credit_once_with_mock(setup_database, monkeypatch):
             'status':'success','amount':50000,'currency':'NGN'}})
     async with httpx.AsyncClient(transport=httpx.MockTransport(respond)) as client:
         gateway = ps.PaystackLive('sk_live_fake', client)
-        pid, _, _, credit = await ps.create_deposit(99,'500','tester@example.com',gateway=gateway,channel='card')
+        pid, _, _, credit = await ps.create_deposit(99,'500','tester@example.com',gateway=gateway)
         assert credit == Decimal('.5000')
         assert not await ps.settle(state['reference'],gateway=gateway,notifier=notifier)
         state['domain']='live'

@@ -294,9 +294,8 @@ async def callbacks(callback: CallbackQuery):
             await clear_flow(uid)
             if not paystack.eligible(uid):
                 return await callback.message.answer('This payment method is not available for your account.')
-            channel = 'card'
-            label = '💳 CARD DEPOSIT'
-            await save_flow(uid, {'type': 'paystack_amount', 'channel': channel})
+            label = '💳 PAYSTACK DEPOSIT'
+            await save_flow(uid, {'type': 'paystack_amount'})
             await show_selection_menu(callback.message,
                 f'{label}\n\nCurrency: NGN\nMinimum deposit: ₦500\nExchange rate: ₦{settings.paystack_ngn_per_usd:,} / $1\n\nEnter the amount to deposit.',
                 keyboard([[('⬅️ Payment Methods', 'topup')]]), edit=True)
@@ -908,7 +907,7 @@ async def prompt_topup(target, uid: int, *, edit: bool = False, crypto_only=Fals
         await clear_flow(uid)
         options = []
         if paystack.eligible(uid):
-            options += [[('💳 Debit / Credit Card (NGN)', 'paystack:start:card')]]
+            options += [[('💳 PAYSTACK TRANSFER OR DEBIT CARD', 'paystack:start')]]
         options += [[('🪙 Cryptocurrency (USD)', 'ui:bankcrypto')],
                     [('📄 Deposit History', 'ui:deposits')],
                     [('⬅️ Main Menu', 'menu:home')]]
@@ -2565,7 +2564,7 @@ async def handle_pending_text(message: Message):
                 ngn, credit = paystack.quote(raw)
             except PaystackError as exc:
                 return await message.answer(str(exc))
-            await save_flow(uid, {'type': 'paystack_email', 'amount': str(ngn), 'credit': str(credit), 'channel': 'card'})
+            await save_flow(uid, {'type': 'paystack_email', 'amount': str(ngn), 'credit': str(credit)})
             return await show_selection_menu(message,
                 f'📋 DEPOSIT SUMMARY\n\nAmount: ₦{ngn:,.2f}\nWallet credit: ${credit:.4f}\n\n'
                 'Enter your email address for the secure checkout and receipt. '
@@ -2577,7 +2576,7 @@ async def handle_pending_text(message: Message):
                 await clear_flow(uid)
                 return await message.answer('Exchange rate changed. Open Top up for a new quote.')
             await clear_flow(uid)
-            pid, url, ngn, credit = await paystack.create_deposit(uid, flow['amount'], raw, channel=flow.get('channel', 'card'))
+            pid, url, ngn, credit = await paystack.create_deposit(uid, flow['amount'], raw)
         except PaystackError:
             return await message.answer('Checkout could not be confirmed. Open My deposits or contact support before retrying.')
         return await message.answer(f'🔐 SECURE CHECKOUT\n\nDeposit: #{pid}\nAmount: ₦{ngn:,.2f}\nWallet credit: ${credit:.4f}\n\nYour wallet will be credited automatically after confirmation.',
