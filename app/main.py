@@ -137,6 +137,7 @@ async def lifespan(app: FastAPI):
         'textverified': TextVerifiedSms(),
         'smspool': SMSPool(),
     }
+    log.info('FRIDAY configured primary provider: %s', settings.provider_name)
     provider = providers.get(settings.provider_name)
     if provider is None:
         raise RuntimeError('Unknown PROVIDER_NAME')

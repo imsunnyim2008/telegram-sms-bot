@@ -72,6 +72,8 @@ ADMIN_HELP = (
     '/cancel — Cancel an unfinished price or deposit entry\n\n'
     '🧪 Diagnostics\n'
     '/setupcheck — Check provider/payment setup\n'
+    '/providerplans — Read-only rental catalogue diagnostics\n'
+    '/heldorders — Inspect unresolved order charges\n'
     '/testall — Run read-only system diagnostics\n'
     '/stats — View customer and order statistics\n'
     '/dailyreport — Daily order and wallet activity (UTC)\n'

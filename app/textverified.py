@@ -136,6 +136,26 @@ class TextVerifiedSms:
                 raise AmbiguousPurchase("TextVerified purchase response unclear") from exc
             raise ProviderError("TextVerified returned invalid JSON") from exc
 
+    async def catalogue_capabilities(self) -> dict:
+        """Read-only account diagnostics; catalogue access is not resale approval."""
+        async def count(kind):
+            try:
+                rows = await self._request("GET", "/api/pub/v2/services",
+                    params={"numberType": "mobile", "reservationType": kind})
+                if not isinstance(rows, list):
+                    return None
+                return len({row["serviceName"] for row in rows
+                            if isinstance(row, dict)
+                            and isinstance(row.get("serviceName"), str)
+                            and row["serviceName"]
+                            and str(row.get("capability", "")).lower()
+                            in {"sms", "smsandvoicecombo"}})
+            except ProviderError:
+                return None
+        kinds = ("verification", "nonrenewable", "renewable")
+        values = await asyncio.gather(*(count(kind) for kind in kinds))
+        return dict(zip(kinds, values))
+
     async def get_prices(self, *, fresh: bool = False) -> list[PriceItem]:
         if not fresh and self._cache and time.monotonic() - self._cached_at < 60:
             return self._cache
@@ -258,6 +278,9 @@ class TextVerifiedSms:
         if not isinstance(details, dict):
             raise ProviderError("Invalid TextVerified order response")
         state = str(details.get("state", "")).lower()
+        if state == "verificationrefunded":
+            # A confirmed refund does not depend on the separate SMS history endpoint.
+            return {"status": "CANCELLED", "sms": []}
         phone = str(details.get("number") or self._known_numbers.get(oid) or "")
         if not phone.isdigit():
             raise ProviderError("TextVerified number unavailable")

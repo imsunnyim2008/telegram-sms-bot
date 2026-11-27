@@ -2228,6 +2228,44 @@ async def customer_information(message: Message):
     await message.answer(pages[command])
 
 
+@router.message(Command('providerplans'))
+async def provider_plans(message: Message):
+    if not await private_admin(message):
+        return
+    provider = shop.providers.get('textverified')
+    if not provider:
+        return await message.answer('TextVerified is not configured.')
+    values = await provider.catalogue_capabilities()
+    labels = {'verification': 'One-time service catalogue',
+              'nonrenewable': 'Fixed-term rental catalogue',
+              'renewable': 'Renewable rental catalogue'}
+    lines = ['TextVerified plan diagnostics (read-only)']
+    for kind, label in labels.items():
+        n = values.get(kind)
+        lines.append(f'{label}: {n} SMS service entries' if n is not None
+                     else f'{label}: unavailable or not authorized')
+    lines.append('Catalogue access does not establish live stock, purchase permission or commercial resale approval.')
+    lines.append('Rental purchases and automatic renewals are not enabled. No funds were moved.')
+    await message.answer('\n'.join(lines))
+
+
+@router.message(Command('heldorders'))
+async def held_orders(message: Message):
+    if not await private_admin(message):
+        return
+    async with Session() as s:
+        rows = (await s.scalars(select(Activation).where(
+            Activation.status.in_(('ordering', 'manual_review')))
+            .order_by(Activation.id.desc()).limit(20))).all()
+    lines = ['Held orders (latest 20; no codes or phone numbers)']
+    for row in rows:
+        lines.append(f'#{row.id} • {row.provider} • {row.price_charged} {settings.wallet_currency} • {row.status} • provider ID: {"recorded" if row.provider_order_id else "missing"}')
+    if not rows:
+        lines.append('No held orders found.')
+    lines.append('Uncertain charges are not automatically released without provider confirmation.')
+    await message.answer('\n'.join(lines))
+
+
 @router.message(F.text)
 async def handle_pending_text(message: Message):
     # Only input explicitly requested by this bot is interpreted as an amount.
