@@ -4,6 +4,7 @@ import json
 import logging
 import time
 from difflib import get_close_matches
+from hashlib import sha256
 from secrets import token_hex
 from datetime import timedelta, timezone
 from decimal import Decimal, InvalidOperation
@@ -289,6 +290,8 @@ async def callbacks(callback: CallbackQuery):
             await button_action(callback, uid, data[3:])
         elif data.startswith('services:'):
             await prompt_service_search(callback.message, uid, edit=True)
+        elif data.startswith('catalogue:'):
+            await catalogue_callback(callback.message, uid, data)
         elif data in ('planinfo:rental', 'planinfo:renewable'):
             label = 'Fixed-term rental' if data == 'planinfo:rental' else 'Monthly renewable rental'
             await callback.message.answer(f'{label} is not available for purchase in FRIDAY yet. No payment was taken. Pricing and eligibility must be confirmed before launch.')
@@ -477,8 +480,7 @@ async def countries(target, service: str, page: int = 0, *, edit: bool = False,
         rows.append(nav)
     rows.append([('📅 Rental — unavailable', 'planinfo:rental')])
     rows.append([('🔄 Monthly — unavailable', 'planinfo:renewable')])
-    rows.append([('🔎 Search again', 'services:0')])
-    rows.append([('⬅️ Main menu', 'menu:home')])
+    rows.extend(service_navigation_rows())
     await show_selection_menu(
         target,
         f'📱 {service.title()}\n\n'
@@ -2317,7 +2319,9 @@ async def prompt_service_search(target, uid, *, edit=False):
         '🔎 Enter the service name you want.\n\n'
         'Example: Instagram\n'
         'Friday will show the available countries, prices and stock.',
-        keyboard([[('⬅️ Main menu', 'menu:home')]]), edit=edit)
+        keyboard([[('📚 Browse all services', 'catalogue:browse')],
+                  [('💰 Balance', 'balance'), ('📋 My orders', 'orders')],
+                  [('🎧 Support', 'ui:support'), ('⬅️ Main menu', 'menu:home')]]), edit=edit)
 
 
 def catalogue_matches(names, query):
@@ -2326,9 +2330,20 @@ def catalogue_matches(names, query):
                   key=lambda name: (name.casefold() != query, name.casefold()))
 
 
-async def search_service(target, uid, query):
-    if not 2 <= len(query.strip()) <= 50:
-        return await target.answer('Enter a service name (2–50 characters).')
+def service_navigation_rows():
+    return [
+        [('🔎 Search again', 'services:0'), ('📚 All services', 'catalogue:browse')],
+        [('💰 Balance', 'balance'), ('📋 My orders', 'orders')],
+        [('🎧 Support', 'ui:support'), ('❓ Help', 'help')],
+        [('⬅️ Main menu', 'menu:home')],
+    ]
+
+
+def catalogue_token(name):
+    return sha256(name.encode('utf-8')).hexdigest()[:32]
+
+
+async def catalogue_data():
     provider = shop.provider
     try:
         if hasattr(provider, 'catalogue_names'):
@@ -2337,43 +2352,90 @@ async def search_service(target, uid, query):
             live_names = [p.service for p in await provider.get_prices()]
     except Exception:
         live_names = []
-    live_names = set(live_names)
-    names = sorted(live_names | set(reference_names()))
+    live = set(live_names)
+    return sorted(live | set(reference_names())), live
+
+
+async def catalogue_page(target, uid, query='', page=0, *, edit=False):
+    names, _ = await catalogue_data()
+    matches = catalogue_matches(names, query) if query else names
+    page, chunk = _pages(matches, page, 10)
+    await save_flow(uid, {'type': 'service_search', 'query': query})
+    rows = [[(name.title()[:60], 'catalogue:item:' + catalogue_token(name))]
+            for name in chunk]
+    nav = []
+    if page > 0:
+        nav.append(('⬅️ Previous', f'catalogue:page:{page-1}'))
+    if (page + 1) * 10 < len(matches):
+        nav.append(('Next ➡️', f'catalogue:page:{page+1}'))
+    if nav:
+        rows.append(nav)
+    rows.extend(service_navigation_rows())
+    await show_selection_menu(target,
+        f'📚 Service catalogue — {len(matches)} results\n'
+        f'Page {page+1} of {max(1, (len(matches)+9)//10)}\n\n'
+        'Choose a service to view its status, or type another name. '
+        'Listings do not guarantee purchase availability.',
+        keyboard(rows), edit=edit, parse_mode=None)
+
+
+async def service_details(target, uid, name, live_names, *, edit=False):
+    if name not in live_names:
+        status = 'Listed in reference catalogue. Live provider listing not confirmed.'
+    elif not settings.service_allowed(name):
+        status = 'Listed by provider. Purchasing is not enabled for this service.'
+    else:
+        try:
+            offers = await shop.provider.get_prices()
+        except Exception:
+            status = 'Live pricing and stock are temporarily unavailable.'
+        else:
+            if any(p.service == name and p.stock > 0 for p in offers):
+                await clear_flow(uid)
+                return await countries(target, name, viewer_id=uid, edit=edit)
+            status = 'No live offer is currently confirmed.'
+    await save_flow(uid, {'type': 'service_search'})
+    await show_selection_menu(target,
+        f'📱 {name.title()}\n\n{status}\n'
+        'Price and stock: unconfirmed. No payment has been taken.',
+        keyboard(service_navigation_rows()), edit=edit, parse_mode=None)
+
+
+async def catalogue_callback(target, uid, data):
+    if data == 'catalogue:browse':
+        return await catalogue_page(target, uid, edit=True)
+    if data.startswith('catalogue:page:'):
+        flow = await read_flow(uid)
+        if not flow or flow.get('type') != 'service_search':
+            return await prompt_service_search(target, uid, edit=True)
+        return await catalogue_page(target, uid, flow.get('query', ''),
+                                    int(data.rsplit(':', 1)[1]), edit=True)
+    if data.startswith('catalogue:item:'):
+        token = data.rsplit(':', 1)[1]
+        names, live = await catalogue_data()
+        name = next((n for n in names if catalogue_token(n) == token), None)
+        if name is not None:
+            return await service_details(target, uid, name, live, edit=True)
+    await prompt_service_search(target, uid, edit=True)
+
+
+async def search_service(target, uid, query):
+    if not 2 <= len(query.strip()) <= 50:
+        return await target.answer('Enter a service name (2–50 characters).')
+    names, live = await catalogue_data()
     matches = catalogue_matches(names, query)
     if not matches:
         suggestions = get_close_matches(query.strip().casefold(), names, n=3, cutoff=0.7)
-        if suggestions:
-            return await target.answer('No exact match. Did you mean: ' + ', '.join(suggestions) + '? Type the service name to continue.', parse_mode=None)
-        return await target.answer('No matching service found in the provider catalogue. Enter another name.')
+        rows = [[(name.title()[:60], 'catalogue:item:' + catalogue_token(name))]
+                for name in suggestions]
+        await show_selection_menu(target,
+            'No matching service found. Choose a suggestion or type another name.',
+            keyboard(rows + service_navigation_rows()), parse_mode=None)
+        return
     exact = next((name for name in matches if name.casefold() == query.strip().casefold()), None)
     if exact or len(matches) == 1:
-        name = exact or matches[0]
-        if name not in live_names:
-            return await target.answer(f'{name.title()} — found in reference catalogue. Live provider listing not confirmed; no purchase available. Enter another name.', parse_mode=None)
-        if not settings.service_allowed(name):
-            return await target.answer(f'{name.title()} — found in live catalogue. Purchasing is not enabled in Friday. Price and stock are not confirmed. Enter another name.', parse_mode=None)
-        try:
-            offers = await provider.get_prices()
-        except Exception:
-            return await target.answer('Live price and stock are temporarily unavailable. Try again.')
-        if not any(p.service == name and p.stock > 0 for p in offers):
-            return await target.answer(f'{name.title()} is listed, but no live offer is currently confirmed. Enter another name.')
-        await clear_flow(uid)
-        return await countries(target, name, viewer_id=uid)
-    # Keep the input active. Return all matches in readable batches, without
-    # generating purchase buttons for services outside the approved list.
-    rows = [name.title() for name in matches]
-    for offset in range(0, len(rows), 60):
-        chunk = rows[offset:offset+60]
-        # Bound Telegram messages even for long catalogue names.
-        body = 'Matching services — type the exact name:\n'
-        for label in chunk:
-            if len(body) + len(label) + 1 > 3500:
-                await target.answer(body, parse_mode=None)
-                body = ''
-            body += label + '\n'
-        if body:
-            await target.answer(body, parse_mode=None)
+        return await service_details(target, uid, exact or matches[0], live)
+    await catalogue_page(target, uid, query)
 
 
 @router.message(Command('findservice'))
