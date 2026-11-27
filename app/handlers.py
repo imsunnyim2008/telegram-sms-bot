@@ -288,12 +288,14 @@ async def callbacks(callback: CallbackQuery):
     if not await allowed(uid, callback.message):
         return
     try:
-        if data in ('paystack:start', 'paystack:start:card', 'paystack:start:bank_transfer'):
+        if data == 'paystack:start:bank_transfer':
+            await prompt_topup(callback.message, uid, edit=True)
+        elif data in ('paystack:start', 'paystack:start:card'):
             await clear_flow(uid)
             if not paystack.eligible(uid):
                 return await callback.message.answer('This payment method is not available for your account.')
-            channel = data.split(':')[-1] if data != 'paystack:start' else 'card'
-            label = '💳 CARD DEPOSIT' if channel == 'card' else '🏦 BANK TRANSFER'
+            channel = 'card'
+            label = '💳 CARD DEPOSIT'
             await save_flow(uid, {'type': 'paystack_amount', 'channel': channel})
             await show_selection_menu(callback.message,
                 f'{label}\n\nCurrency: NGN\nMinimum deposit: ₦500\nExchange rate: ₦{settings.paystack_ngn_per_usd:,} / $1\n\nEnter the amount to deposit.',
@@ -906,8 +908,7 @@ async def prompt_topup(target, uid: int, *, edit: bool = False, crypto_only=Fals
         await clear_flow(uid)
         options = []
         if paystack.eligible(uid):
-            options += [[('💳 Debit / Credit Card (NGN)', 'paystack:start:card')],
-                        [('🏦 Bank Transfer (NGN)', 'paystack:start:bank_transfer')]]
+            options += [[('💳 Debit / Credit Card (NGN)', 'paystack:start:card')]]
         options += [[('🪙 Cryptocurrency (USD)', 'ui:bankcrypto')],
                     [('📄 Deposit History', 'ui:deposits')],
                     [('⬅️ Main Menu', 'menu:home')]]
@@ -2564,7 +2565,7 @@ async def handle_pending_text(message: Message):
                 ngn, credit = paystack.quote(raw)
             except PaystackError as exc:
                 return await message.answer(str(exc))
-            await save_flow(uid, {'type': 'paystack_email', 'amount': str(ngn), 'credit': str(credit), 'channel': flow.get('channel', 'card')})
+            await save_flow(uid, {'type': 'paystack_email', 'amount': str(ngn), 'credit': str(credit), 'channel': 'card'})
             return await show_selection_menu(message,
                 f'📋 DEPOSIT SUMMARY\n\nAmount: ₦{ngn:,.2f}\nWallet credit: ${credit:.4f}\n\n'
                 'Enter your email address for the secure checkout and receipt. '

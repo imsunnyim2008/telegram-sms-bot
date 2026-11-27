@@ -306,3 +306,13 @@ async def test_admin_balance_shows_provider_funds_only_in_private(setup_database
     await handlers.show_balance(customer, 99)
     assert 'Your balance:' in customer.answers[-1][0]
     assert 'Provider balance' not in customer.answers[-1][0]
+
+
+@pytest.mark.asyncio
+async def test_topup_card_only_with_crypto_and_no_bank_buttons(setup_database, monkeypatch):
+    monkeypatch.setattr(handlers.paystack, 'eligible', lambda uid: True)
+    message = Target(uid=99)
+    await handlers.prompt_topup(message, 99)
+    buttons = [b for row in message.answers[-1][1]['reply_markup'].inline_keyboard for b in row]
+    assert [b.callback_data for b in buttons] == ['paystack:start:card', 'ui:bankcrypto', 'ui:deposits', 'menu:home']
+    assert not any('bank transfer' in b.text.lower() for b in buttons)

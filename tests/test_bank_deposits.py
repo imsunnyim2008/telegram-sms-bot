@@ -169,6 +169,10 @@ async def test_customer_bank_flow_has_copy_buttons_and_one_verification_method(s
     await configure(session, monkeypatch)
     msg = fixtures.Target(uid=99)
     await handlers.bank_button(msg, 99, ['bankstart'])
+    assert 'Choose a deposit method' in msg.edits[-1][0]
+    assert await handlers.read_flow(99) is None
+    # Preserve recovery of a legacy transfer flow that was already started.
+    await handlers.save_flow(99, {'type': 'bank_input', 'action': 'amount'})
     msg.text = '600'
     await handlers.handle_pending_text(msg)
     buttons = [b for row in msg.answers[-1][1]['reply_markup'].inline_keyboard for b in row]
