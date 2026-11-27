@@ -23,6 +23,8 @@ from .country_ui import arrange_country_offers, country_flag
 from .command_menu import PUBLIC_HELP, ADMIN_HELP
 from .db import Activation, AdminAudit, BankDeposit, LedgerEntry, Payment, Session, Setting, SupportMessage, User, utcnow
 from . import bank_deposits as bank
+from . import paystack_payments as paystack
+from .paystack_test import PaystackError
 from .operations import LAGOS, STARTED_AT, audit, claim_purchase, notice, report, risk_summary
 from .moniepoint import pilot_status
 from .auto_maintenance import acknowledge, manual_mode
@@ -286,7 +288,15 @@ async def callbacks(callback: CallbackQuery):
     if not await allowed(uid, callback.message):
         return
     try:
-        if data.startswith('ui:'):
+        if data == 'paystack:start':
+            await clear_flow(uid)
+            if not paystack.eligible(uid):
+                return await callback.message.answer('Paystack deposits are not enabled yet.')
+            await save_flow(uid, {'type': 'paystack_amount'})
+            await show_selection_menu(callback.message,
+                f'🇳🇬 Paystack — enter NGN amount (minimum ₦500). Rate: ₦{settings.paystack_ngn_per_usd} per USD.',
+                keyboard([[('⬅️ Payment methods', 'topup')]]), edit=True)
+        elif data.startswith('ui:'):
             await button_action(callback, uid, data[3:])
         elif data.startswith('services:'):
             await prompt_service_search(callback.message, uid, edit=True)
@@ -894,8 +904,9 @@ async def prompt_topup(target, uid: int, *, edit: bool = False, crypto_only=Fals
     if not crypto_only:
         await clear_flow(uid)
         status = '' if bank.ready(cfg) else '\nBank transfer is not yet enabled; configuration is required.'
+        options = [[('💳 Paystack — card / bank transfer', 'paystack:start')]] if paystack.eligible(uid) else []
         return await show_selection_menu(target, 'Choose a deposit method:' + status,
-            keyboard([[('🇳🇬 Nigerian bank transfer', 'ui:bankstart')],
+            keyboard(options + [[('🇳🇬 Nigerian bank transfer', 'ui:bankstart')],
                       [('🪙 Cryptocurrency', 'ui:bankcrypto')],
                       [('My bank claims', 'ui:bankclaims')], [('⬅️ Main menu', 'menu:home')]]), edit=edit)
     await save_flow(uid, {'type': 'topup'})
@@ -1802,7 +1813,7 @@ async def deposits_card(target, uid):
     async with Session() as s:
         rows = (await s.scalars(select(Payment).where(Payment.user_id == uid)
                                 .order_by(Payment.id.desc()).limit(15))).all()
-    buttons = [[(f'#{row.id} · {row.amount_fiat} {settings.wallet_currency} · {row.status}',
+    buttons = [[(f'#{row.id} · {row.amount_fiat} {"NGN" if row.gateway == "paystack" else settings.wallet_currency} · {row.status}',
                  f'ui:depositreceipt:{row.id}')] for row in rows]
     await show_selection_menu(target, '💳 Your deposits — select an invoice for its status or receipt.'
                               if rows else 'No deposits yet.',
@@ -1814,6 +1825,13 @@ async def deposit_receipt(target, uid, pid):
         row = await s.get(Payment, pid)
         if not row or row.user_id != uid:
             return await target.answer('Deposit not found.')
+    if row.gateway == 'paystack' and row.status == 'created':
+        try:
+            await paystack.settle(row.gateway_invoice_id)
+        except Exception:
+            return await target.answer('Paystack verification is temporarily unavailable. No new charge was made.')
+        async with Session() as s:
+            row = await s.get(Payment, pid)
     if row.status != 'paid':
         return await target.answer(f'Deposit #{row.id}: {row.status}. No confirmed receipt yet.')
     from aiogram.types import BufferedInputFile
@@ -2532,6 +2550,31 @@ async def handle_pending_text(message: Message):
     flow = await read_flow(uid)
     if not flow:
         return
+    if flow.get('type') in ('paystack_amount', 'paystack_email'):
+        if not await private_customer(message) or not paystack.eligible(uid):
+            await clear_flow(uid)
+            return
+        if flow['type'] == 'paystack_amount':
+            try:
+                ngn, credit = paystack.quote(raw)
+            except PaystackError as exc:
+                return await message.answer(str(exc))
+            await save_flow(uid, {'type': 'paystack_email', 'amount': str(ngn), 'credit': str(credit)})
+            return await show_selection_menu(message,
+                f'Pay ₦{ngn} to receive ${credit} wallet credit. Enter your email for Paystack checkout and receipt. '
+                'Your email is sent to Paystack. Do not enter card details here.',
+                keyboard([[('⬅️ Cancel', 'topup')]]))
+        try:
+            _, credit = paystack.quote(flow['amount'])
+            if str(credit) != flow['credit']:
+                await clear_flow(uid)
+                return await message.answer('Exchange rate changed. Open Top up for a new quote.')
+            await clear_flow(uid)
+            pid, url, ngn, credit = await paystack.create_deposit(uid, flow['amount'], raw)
+        except PaystackError:
+            return await message.answer('Checkout could not be confirmed. Open My deposits or contact support before retrying.')
+        return await message.answer(f'Paystack deposit #{pid}: ₦{ngn} → ${credit}. Pay only through the secure checkout.',
+            reply_markup=InlineKeyboardMarkup(inline_keyboard=[[InlineKeyboardButton(text='Pay with Paystack', url=url)]]))
     if flow.get('type') == 'service_search':
         if await private_customer(message):
             return await search_service(message, uid, raw)
