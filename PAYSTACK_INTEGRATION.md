@@ -1,15 +1,18 @@
-# Paystack integration — test foundation
+# Paystack live integration (staged, not deployed)
 
-This branch adds an isolated test-mode client and mocked tests. It is deliberately not connected to the live bot, webhooks or customer balances.
+Existing NOWPayments and manual bank flows remain intact. The new code is disabled by default and uses the live Paystack environment only if explicitly enabled.
 
-Before a production rollout:
-- Confirm the approved merchant activities, including the actual FRIDAY offering, with Paystack.
-- Obtain a test secret key via the dashboard. Store credentials only in a separate test environment. Never paste them into chats or commits.
-- Collect the payer's actual email with notice of its use; Paystack requires an email.
-- Choose an explicit NGN to USD conversion rate and snapshot it per invoice. The current FRIDAY wallet is USD; test payments must never credit a production wallet.
-- Implement persistent reference creation, authenticated verification and atomic one-time wallet credits in an isolated test database; verify expected amount in kobo, reference, currency, status and environment.
-- Register a test-only webhook endpoint; verify signatures before processing, and use durable retry/reconciliation.
-- Add tests for duplicates, wrong currencies, test/live separation, interrupted checkouts, reversals and failure recovery. Keep NOWPayments intact.
-- Obtain review before merging and deploying.
+Required Render configuration:
+- PAYSTACK_SECRET_KEY: live key, never commit or share.
+- PAYSTACK_WEBHOOK_SECRET: dashboard webhook signing secret if using the modern signature header. Legacy HMAC verification uses the live API secret.
+- PAYSTACK_NGN_PER_USD: administrator-selected positive conversion rate. No assumed exchange rate.
+- PAYSTACK_ENABLED=false until reviewed and verified.
+- PAYSTACK_ADMIN_ONLY=true for a controlled rollout before public access.
+
+Callback: /paystack/callback (informational, never proof of payment).
+Webhook: /webhook/paystack (raw-body signature plus authenticated transaction verification).
+The wallet is USD. Persist original NGN amount, USD credit, and unique reference before checkout. Verify live domain, exact reference, amount, currency, and success; credit once in a database transaction. An owner can recheck a pending payment from My deposits.
+
+Remaining requirements before production: complete CI, inspect migration compatibility, review chargebacks/reversals, add reconciliation/monitoring for abandoned or delayed payments, confirm merchant activity approval, and verify fee/currency reporting. Test with mocked requests; never initiate a real charge during review.
 
 Docs: https://paystack.com/docs/api/transaction/ and https://paystack.com/docs/payments/webhooks/

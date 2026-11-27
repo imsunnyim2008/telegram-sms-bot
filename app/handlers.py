@@ -1825,6 +1825,13 @@ async def deposit_receipt(target, uid, pid):
         row = await s.get(Payment, pid)
         if not row or row.user_id != uid:
             return await target.answer('Deposit not found.')
+    if row.gateway == 'paystack' and row.status == 'created':
+        try:
+            await paystack.settle(row.gateway_invoice_id)
+        except Exception:
+            return await target.answer('Paystack verification is temporarily unavailable. No new charge was made.')
+        async with Session() as s:
+            row = await s.get(Payment, pid)
     if row.status != 'paid':
         return await target.answer(f'Deposit #{row.id}: {row.status}. No confirmed receipt yet.')
     from aiogram.types import BufferedInputFile
