@@ -89,7 +89,7 @@ class Shop:
 
     async def price(self, item: PriceItem, user_id: int | None = None) -> Decimal:
         # Public overrides and markup are for customers only. Administrators
-        # see and pay the original provider cost, including at checkout.
+        # see the original provider cost; provider-funded orders do not debit a wallet.
         if user_id is not None and user_id in settings.admins:
             return self.original_price(item)
         self.original_price(item)  # validate currency conversion for all viewers
@@ -119,6 +119,8 @@ class Shop:
         if not settings.live_ready:
             raise BotError('Live purchases are disabled until admin setup is complete')
         item, charge = await self.quote(service, country, user_id=user_id)
+        provider_funded = user_id in settings.admins
+        wallet_charge = Decimal('0') if provider_funded else charge
         if await self.provider.get_balance() < item.cost:
             raise BotError('Provider balance is insufficient. Please try again later.')
         async with Session.begin() as s:
@@ -140,14 +142,15 @@ class Shop:
             activation = Activation(
                 user_id=user_id, service=service, country=country,
                 provider=settings.provider_name,
-                cost_provider=item.cost, price_charged=charge,
+                cost_provider=item.cost, price_charged=wallet_charge,
                 status='ordering', expires_at=utcnow() + timedelta(seconds=settings.activation_timeout_seconds),
                 next_poll_at=utcnow() + timedelta(seconds=10),
             )
             s.add(activation)
             await s.flush()
             try:
-                await apply(s, user_id, -charge, 'purchase', 'activation', str(activation.id))
+                if not provider_funded:
+                    await apply(s, user_id, -wallet_charge, 'purchase', 'activation', str(activation.id))
             except InsufficientFunds as exc:
                 raise BotError(str(exc)) from exc
             aid = activation.id
@@ -159,14 +162,19 @@ class Shop:
             async with Session.begin() as s:
                 row = await s.get(Activation, aid, with_for_update=True)
                 row.status = 'manual_review'
-            await self.alert_admins('Order ' + str(aid) + ' needs provider reconciliation; charge held.')
+            await self.alert_admins('Order ' + str(aid) + ' needs provider reconciliation.')
+            if provider_funded:
+                raise BotError(f'Purchase #{aid} has an uncertain provider result. No FRIDAY wallet debit was made. Check the provider order before retrying.')
             raise BotError(f'Purchase #{aid} has an uncertain provider result. Funds are reserved; support is reviewing it.')
         except ProviderError:
             async with Session.begin() as s:
                 row = await s.get(Activation, aid, with_for_update=True)
                 if row.status == 'ordering':
                     row.status = 'failed'
-                    await apply(s, user_id, charge, 'refund', 'activation', str(aid))
+                    if not provider_funded:
+                        await apply(s, user_id, wallet_charge, 'refund', 'activation', str(aid))
+            if provider_funded:
+                raise BotError('Provider could not allocate a number. No FRIDAY wallet debit was made.')
             raise BotError('Provider could not allocate a number. Your balance was refunded.')
         async with Session.begin() as s:
             row = await s.get(Activation, aid, with_for_update=True)
@@ -187,6 +195,10 @@ class Shop:
             if not row or row.status not in {'pending', 'ordering', 'manual_review'}:
                 return False
             row.status = outcome
+            if row.price_charged == 0:
+                # Provider-funded orders have no customer wallet debit to reverse.
+                # Use the stored amount, not the user's current admin role.
+                return True
             return await apply(s, row.user_id, row.price_charged, 'refund', 'activation', str(row.id))
 
     async def cancel(self, user_id: int, activation_id: int) -> None:

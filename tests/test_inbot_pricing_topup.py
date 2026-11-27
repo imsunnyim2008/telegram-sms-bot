@@ -158,8 +158,11 @@ async def test_administrator_can_select_country_and_set_only_public_price(setup_
     assert '0.4500 USD' in admin_visible and '0.9500 USD' not in admin_visible
     order = await shop.buy(99, 'telegram', '12')
     assert order.price_charged == Decimal('.9500')
+    async with session.begin() as db:
+        admin = await db.get(User, 7031009238)
+        admin.balance = Decimal('0')
     admin_order = await shop.buy(7031009238, 'telegram', '12')
-    assert admin_order.price_charged == Decimal('.4500')
+    assert admin_order.price_charged == Decimal('0')
     assert admin_order.cost_provider == Decimal('.45')
     async with session() as db:
         user = await db.get(User, 99)
@@ -168,10 +171,16 @@ async def test_administrator_can_select_country_and_set_only_public_price(setup_
             LedgerEntry.user_id == 99, LedgerEntry.type == 'purchase'))).all()
         assert len(debits) == 1 and debits[0].amount == Decimal('-.9500')
         admin_user = await db.get(User, 7031009238)
-        assert admin_user.balance == Decimal('9.5500')
+        assert admin_user.balance == Decimal('0')
         admin_debits = (await db.scalars(select(LedgerEntry).where(
             LedgerEntry.user_id == 7031009238, LedgerEntry.type == 'purchase'))).all()
-        assert len(admin_debits) == 1 and admin_debits[0].amount == Decimal('-.4500')
+        assert not admin_debits
+    assert await shop.refund(admin_order.id, 'cancelled')
+    assert not await shop.refund(admin_order.id, 'cancelled')
+    async with session() as db:
+        assert (await db.get(User, 7031009238)).balance == Decimal('0')
+        assert not (await db.scalars(select(LedgerEntry).where(
+            LedgerEntry.user_id == 7031009238, LedgerEntry.type == 'refund'))).all()
 
 
 @pytest.mark.asyncio
@@ -279,3 +288,20 @@ async def test_bank_config_continues_without_restarting(setup_database, monkeypa
     assert await handlers.read_flow(uid) is None
     assert 'ui:banktoggle:on' in str(message.answers[-1][1]['reply_markup'])
     assert not gateway.invoices
+
+
+@pytest.mark.asyncio
+async def test_admin_balance_shows_provider_funds_only_in_private(setup_database):
+    _, shop, _ = setup_database
+    admin = Target(uid=7031009238)
+    await handlers.show_balance(admin, 7031009238)
+    assert 'Provider balance' in admin.answers[-1][0]
+    assert '20 ' in admin.answers[-1][0]
+    assert 'No FRIDAY top-up required' in admin.answers[-1][0]
+    group = Target(uid=7031009238, chat_type='group')
+    await handlers.show_balance(group, 7031009238)
+    assert 'private chat' in group.answers[-1][0]
+    customer = Target(uid=99)
+    await handlers.show_balance(customer, 99)
+    assert 'Your balance:' in customer.answers[-1][0]
+    assert 'Provider balance' not in customer.answers[-1][0]

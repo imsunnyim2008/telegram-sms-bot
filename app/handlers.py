@@ -59,8 +59,8 @@ MAIN = keyboard([
 ])
 
 MAIN_ADMIN = keyboard([
-    [('📱 Buy number', 'services:0'), ('💰 Balance', 'balance')],
-    [('💳 Top up', 'topup'), ('📋 My orders', 'orders')],
+    [('📱 Buy number', 'services:0'), ('💰 Provider balance', 'balance')],
+    [('💳 Wallet / deposits', 'topup'), ('📋 My orders', 'orders')],
     [('📜 History', 'ui:history'), ('💸 Refunds', 'ui:refunds')],
     [('💳 My deposits', 'ui:deposits')],
     [('👤 My account', 'ui:account'), ('🎧 Support', 'ui:support')],
@@ -310,11 +310,14 @@ async def callbacks(callback: CallbackQuery):
                      if hasattr(provider, 'get_country_names') else {})
             selected_country = names.get(country, f'Country #{country}')
             price_label = 'Original provider price' if uid in settings.admins else 'Total price'
+            funding_note = ('Funding: provider balance. No FRIDAY wallet debit. Confirmed refunds return to the provider account.'
+                            if uid in settings.admins else
+                            'Funds are reserved on confirmation. Eligible no-code orders are refunded after provider confirmation.')
             await callback.message.answer(
                 '🟢 FINAL CONFIRMATION\n\n'
                 f'Service: {service.title()}\nCountry: {country_flag(selected_country)} {selected_country}\n'
                 f'Available: {item.stock}\n{price_label}: {charge} {settings.wallet_currency}\n'
-                'Funds are reserved on confirmation. Eligible no-code orders are refunded after provider confirmation.',
+                funding_note,
                 reply_markup=keyboard([[('✅ Confirm purchase', f'buy:{service}:{country}')],
                                        [('⬅️ Back', f'countries:{service}:0')]]),
             )
@@ -693,6 +696,20 @@ async def admin_price_save(target, uid: int, flow: dict, raw: str):
 
 async def show_balance(target, uid, *, edit: bool = False):
     user = await shop.get_user(uid)
+    if uid in settings.admins:
+        if getattr(getattr(target, 'chat', None), 'type', None) != 'private':
+            return await target.answer('Open Friday in your private chat to view provider balance.')
+        try:
+            balance = await shop.provider.get_balance()
+            unit = 'USD' if settings.provider_name in ('textverified', 'smspool') else 'provider units'
+            label = f'{balance} {unit}'
+        except Exception:
+            label = 'temporarily unavailable'
+        return await show_selection_menu(target,
+            f'💰 Provider balance ({settings.provider_name}): {label}\n'
+            'Admin orders use provider funds directly. No FRIDAY top-up required.\n'
+            f'Existing wallet credit (separate): {user.balance} {settings.wallet_currency}',
+            main_menu_for(uid), edit=edit)
     await show_selection_menu(
         target, f'Your balance: {user.balance} {settings.wallet_currency}',
         main_menu_for(uid), edit=edit,
@@ -1297,7 +1314,7 @@ async def order_receipt(message: Message):
     body = (f'FRIDAY order record #{row.id}\n'
             f'Service: {row.service}\nStatus: {row.status}\n'
             f'Created: {row.created_at:%Y-%m-%d %H:%M} UTC\n'
-            f'Original charge: {row.price_charged} {settings.wallet_currency}\n'
+            f'FRIDAY wallet charge: {row.price_charged} {settings.wallet_currency}\n'
             'For confirmed refunds see /refunds. This is an order record, not a tax invoice.\n')
     await message.answer_document(BufferedInputFile(body.encode(), filename=f'order-{row.id}.txt'))
 
