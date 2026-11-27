@@ -1,7 +1,7 @@
 """Paystack live deposits, separate from crypto and disabled by default."""
 import re
 import uuid
-from decimal import Decimal, ROUND_DOWN, InvalidOperation
+from decimal import Decimal, ROUND_DOWN
 
 import httpx
 from sqlalchemy import select
@@ -9,7 +9,7 @@ from sqlalchemy import select
 from .config import settings
 from .db import Payment, User, Session, utcnow
 from .ledger import apply
-from .paystack_test import PaystackTest, PaystackError, verify_signature, REF
+from .paystack_test import PaystackTest, PaystackError, REF
 
 
 def ready():

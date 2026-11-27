@@ -20,7 +20,7 @@ from .db import engine, init_db, Session, TelegramUpdateReceipt
 from .gateway import CryptoBot
 from .nowpayments import NowPayments
 from . import paystack_payments as paystack
-from .paystack_test import PaystackError
+from .paystack_test import verify_signature as verify_paystack_signature
 from .pricing_web import router as pricing_router
 from .handlers import router, set_shop
 from .command_menu import register_native_menu
@@ -423,7 +423,7 @@ async def paystack_webhook(request: Request):
         if len(body) > 65536:
             raise HTTPException(status_code=413, detail='Payload too large')
     raw = bytes(body)
-    if not paystack.verify_signature(raw, request.headers.get('x-paystack-signature', ''),
+    if not verify_paystack_signature(raw, request.headers.get('x-paystack-signature', ''),
             request.headers.get('paystack-signature', ''), test_key=settings.paystack_secret_key,
             signing_secret=settings.paystack_webhook_secret, mode='live'):
         raise HTTPException(status_code=401, detail='Invalid signature')

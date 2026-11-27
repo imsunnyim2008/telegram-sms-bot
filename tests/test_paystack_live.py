@@ -5,7 +5,9 @@ import app.paystack_payments as ps
 from app.config import settings
 from app.db import Payment, User, LedgerEntry
 from sqlalchemy import select
-from test_inbot_pricing_topup import setup_database
+import test_inbot_pricing_topup as fixtures
+
+setup_database = fixtures.setup_database
 
 
 @pytest.mark.asyncio
