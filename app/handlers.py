@@ -1330,13 +1330,39 @@ async def mark_customer_done(message, uid: int, aid: int):
                          reply_markup=keyboard([[('⬅️ Main menu', 'menu:home')]]))
 
 
+SUPPORT_USERNAME = '@waynelogs26'
+SUPPORT_URL = 'https://t.me/waynelogs26'
+
+
+def support_keyboard(order_id=None):
+    rows = [[InlineKeyboardButton(text='💬 Message Admin', url=SUPPORT_URL)]]
+    if order_id is not None:
+        rows.append([InlineKeyboardButton(text='✏️ Describe issue in FRIDAY',
+                                          callback_data=f'ui:supportwrite:{order_id}')])
+        rows.append([InlineKeyboardButton(text='📜 View ticket replies',
+                                          callback_data=f'ui:thread:{order_id}')])
+    else:
+        rows.append([InlineKeyboardButton(text='📋 My orders', callback_data='orders')])
+    rows.append([InlineKeyboardButton(text='⬅️ Main menu', callback_data='menu:home')])
+    return InlineKeyboardMarkup(inline_keyboard=rows)
+
+
+async def support_contact(target, *, edit=False):
+    await show_selection_menu(target,
+        f'🎧 FRIDAY Customer Support\n\n'
+        f'Admin: {SUPPORT_USERNAME}\n\n'
+        'For complaints, payment issues or order problems, tap Message Admin to open a Telegram chat. '
+        'Include your order or deposit reference if applicable. Never share passwords or verification codes.',
+        support_keyboard(), edit=edit)
+
+
 @router.message(Command('support'))
 async def customer_support(message: Message):
     if not await private_customer(message):
         return
     parts = message.text.split()
     if len(parts) != 2 or not parts[1].isdigit() or len(parts[1]) > 9:
-        return await order_picker(message, message.from_user.id, 'support')
+        return await support_contact(message)
     aid, uid = int(parts[1]), message.from_user.id
     created = False
     async with Session.begin() as s:
@@ -1352,9 +1378,9 @@ async def customer_support(message: Message):
             await shop.alert_admins(f'Customer requested support review for order #{aid}. Use /tickets.')
         except Exception:
             log.warning('Support notification failed; ticket remains stored.')
-    await message.answer(f'Support request for order #{aid} recorded. Do not share your verification code.',
-                         reply_markup=keyboard([[('✏️ Describe issue', f'ui:supportwrite:{aid}'),
-                                                 ('📜 View replies', f'ui:thread:{aid}')]]))
+    await message.answer(f'Support request for order #{aid} recorded.\nAdmin: {SUPPORT_USERNAME}\n'
+                         'Tap Message Admin to explain your complaint. Do not share your verification code.',
+                         reply_markup=support_keyboard(aid))
 
 
 @router.message(Command('tickets'))
@@ -1704,6 +1730,8 @@ async def button_action(callback, uid, action):
     if name == 'input' and parts == ['input', 'markup']:
         return await prompt_button_input(target, uid, 'markup', edit=True)
     if name in ('support', 'receipt', 'done', 'check'):
+        if name == 'support' and len(parts) == 1:
+            return await support_contact(target, edit=True)
         if len(parts) == 1:
             return await order_picker(target, uid, name, edit=True)
         if len(parts) == 2:
