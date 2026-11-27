@@ -426,6 +426,9 @@ async def paystack_webhook(request: Request):
     if not verify_paystack_signature(raw, request.headers.get('x-paystack-signature', ''),
             request.headers.get('paystack-signature', ''), test_key=settings.paystack_secret_key,
             signing_secret=settings.paystack_webhook_secret, mode='live'):
+        log.warning('Paystack signature rejected: modern=%s legacy=%s signing_secret_configured=%s',
+                    bool(request.headers.get('paystack-signature')), bool(request.headers.get('x-paystack-signature')),
+                    bool(settings.paystack_webhook_secret))
         raise HTTPException(status_code=401, detail='Invalid signature')
     try:
         event = json.loads(raw)

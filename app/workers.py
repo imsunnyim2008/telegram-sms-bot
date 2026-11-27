@@ -10,6 +10,7 @@ from sqlalchemy import delete, func, or_, select
 
 from .auto_maintenance import mark_notice_sent, observe, pending_notices
 from .config import settings
+from . import paystack_payments as paystack
 from .db import Activation, MaintenanceNotice, OpsNotice, Payment, Session, Setting, User, utcnow
 from .provider import ProviderError
 from .growth_controls import stock_notices
@@ -334,6 +335,7 @@ class Worker:
                 row.next_poll_at = utcnow()
 
     async def poll_payments(self):
+        await self.reconcile_paystack()
         # Hosted NOWPayments invoices generate payment IDs only when the payer
         # begins checkout. Trust only signed IPN + authenticated payment lookup.
         # Do not poll the invoice ID through the Crypto Bot status API.
@@ -341,12 +343,40 @@ class Worker:
             return
         async with Session() as s:
             invoice_ids = (await s.scalars(select(Payment.gateway_invoice_id).where(
-                Payment.status == 'created').order_by(Payment.created_at).limit(20))).all()
+                Payment.status == 'created', Payment.gateway == 'cryptobot').order_by(Payment.created_at).limit(20))).all()
         for invoice_id in invoice_ids:
             try:
                 await self.shop.verify_and_credit(invoice_id)
             except Exception:
                 log.warning('Payment status check failed for a pending invoice')
+
+    async def reconcile_paystack(self):
+        if not settings.paystack_secret_key.startswith('sk_live_'):
+            return
+        # Recover recent paid checkouts even if webhook delivery failed.
+        # Rotate through bounded batches instead of repeatedly querying the oldest.
+        async with Session() as s:
+            rows = (await s.scalars(select(Payment).where(
+                Payment.gateway == 'paystack', Payment.status == 'created',
+                Payment.created_at >= utcnow() - timedelta(days=7),
+                Payment.id > getattr(self, '_paystack_cursor', 0),
+            ).order_by(Payment.id).limit(10))).all()
+        if not rows:
+            self._paystack_cursor = 0
+            return
+        self._paystack_cursor = rows[-1].id
+        for row in rows:
+            try:
+                if await paystack.settle(row.gateway_invoice_id):
+                    try:
+                        await self.shop.notifier.send(row.user_id,
+                            f'✅ Paystack deposit #{row.id} confirmed! +${row.amount_credit} wallet credit.')
+                    except Exception:
+                        log.warning('Paystack deposit credited; notification unavailable')
+            except Exception:
+                log.warning('Paystack reconciliation temporarily unavailable')
+                break
+            await asyncio.sleep(.2)
 
     async def cleanup(self):
         cutoff = utcnow() - timedelta(days=1)
