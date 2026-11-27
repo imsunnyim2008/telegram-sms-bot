@@ -300,9 +300,10 @@ async def callbacks(callback: CallbackQuery):
             selected_country = names.get(country, f'Country #{country}')
             price_label = 'Original provider price' if uid in settings.admins else 'Total price'
             await callback.message.answer(
-                f'{service.title()} • {country_flag(selected_country)} {selected_country}\n'
+                '🟢 FINAL CONFIRMATION\n\n'
+                f'Service: {service.title()}\nCountry: {country_flag(selected_country)} {selected_country}\n'
                 f'Available: {item.stock}\n{price_label}: {charge} {settings.wallet_currency}\n'
-                'You are charged only if a code is received; no-code cancellations are refunded.',
+                'Funds are reserved on confirmation. Eligible no-code orders are refunded after provider confirmation.',
                 reply_markup=keyboard([[('✅ Confirm purchase', f'buy:{service}:{country}')],
                                        [('⬅️ Back', f'countries:{service}:0')]]),
             )
@@ -704,7 +705,7 @@ async def admin_pricing_command(message: Message):
     await admin_price_services(message)
 
 
-@router.message(Command('buy'))
+@router.message(Command('buy', 'order', 'number'))
 async def buy_command(message: Message):
     if await allowed(message.from_user.id, message):
         await services(message)
@@ -2162,7 +2163,7 @@ async def stock_alert_command(message: Message):
     await message.answer('One-time stock alert saved. /stockoff cancels alerts.' if saved else 'Alert unavailable or maximum 5 active alerts reached.')
 
 
-@router.message(Command('referral'))
+@router.message(Command('referral', 'referrals'))
 async def referral_command(message: Message):
     if not await private_customer(message):
         return
@@ -2196,6 +2197,35 @@ async def report_number_command(message: Message):
                              f'Customer reported a rejected number for order #{aid}. Review through /tickets.')
     await message.answer(f'Report recorded for order #{aid}. Refunds require confirmed eligibility.',
                          reply_markup=keyboard([[('View ticket', f'ui:thread:{aid}')]]))
+
+
+@router.message(Command('faq', 'terms', 'privacy', 'about', ignore_case=True))
+async def customer_information(message: Message):
+    if message.chat.type != 'private':
+        return await message.answer('Open FRIDAY in a private chat.')
+    command = (message.text or '').split()[0].split('@')[0].lower()
+    pages = {
+        '/faq': ('❓ FRIDAY · Frequently asked questions\n\n'
+                 'How do I fund my wallet? Use /topup to view available methods.\n'
+                 'How do I view an order? Use /orders or /check.\n'
+                 'When is a refund issued? After an eligible cancellation or refund is confirmed by the provider. '
+                 'Uncertain purchases require reconciliation before funds can be released.\n'
+                 'Can I keep a number? Current one-time orders are not permanent numbers.\n'
+                 'Need help? Use /support.'),
+        '/terms': TERMS,
+        '/privacy': ('🔒 FRIDAY · Data and privacy information\n\n'
+                     'FRIDAY stores your Telegram account identifier, username, wallet ledger, '
+                     'order and payment references, and support messages to operate the service. '
+                     'Order records can include allocated numbers and received SMS codes. '
+                     'Payment processors and number providers handle information needed to fulfil your requests. '
+                     'Do not send passwords or verification codes in support messages. '
+                     'Use /support to contact the operator about an order or account data.'),
+        '/about': ('☀️ About FRIDAY\n\n'
+                   'FRIDAY is a Telegram-based digital service with a wallet, order tracking, '
+                   'receipts and support. Available services and prices depend on provider availability. '
+                   'Use /start to return to the main menu.'),
+    }
+    await message.answer(pages[command])
 
 
 @router.message(F.text)

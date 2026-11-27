@@ -38,7 +38,8 @@ async def test_native_menu_has_only_all_working_public_commands():
     assert any(isinstance(row[1], MenuButtonCommands) for row in bot.calls
                if row[0] == 'menu')
     expected = ['start', 'buy', 'balance', 'topup', 'orders', 'check', 'history', 'refunds',
-                'receipt', 'account', 'done', 'support', 'help', 'clear']
+                'receipt', 'account', 'done', 'support', 'help', 'clear',
+                'referral', 'faq', 'terms', 'privacy', 'about']
     for _, cmds, _ in commands:
         assert [c.command for c in cmds] == expected
         assert 'pricing' not in [c.command for c in cmds]

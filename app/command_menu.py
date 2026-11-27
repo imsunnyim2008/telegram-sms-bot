@@ -13,20 +13,25 @@ from aiogram.types import (BotCommand, BotCommandScopeAllPrivateChats,
 log = logging.getLogger(__name__)
 
 PUBLIC_COMMANDS = [
-    BotCommand(command='start', description='Open Friday main menu'),
-    BotCommand(command='buy', description='Buy an SMS number'),
-    BotCommand(command='balance', description='Check wallet balance'),
-    BotCommand(command='topup', description='Add funds to your wallet'),
-    BotCommand(command='orders', description='View your purchased numbers'),
-    BotCommand(command='check', description='Check SMS for an order'),
-    BotCommand(command='history', description='View wallet transactions'),
-    BotCommand(command='refunds', description='View confirmed refunds'),
-    BotCommand(command='receipt', description='Select an order receipt'),
-    BotCommand(command='account', description='View account statistics'),
-    BotCommand(command='done', description='Select a delivered order to confirm'),
-    BotCommand(command='support', description='Select an order for support'),
+    BotCommand(command='start', description='🏠 Main menu'),
+    BotCommand(command='buy', description='📱 New number order'),
+    BotCommand(command='balance', description='💰 Check wallet balance'),
+    BotCommand(command='topup', description='💳 Fund wallet'),
+    BotCommand(command='orders', description='📋 My orders'),
+    BotCommand(command='check', description='🔄 Check order status'),
+    BotCommand(command='history', description='📜 Wallet history'),
+    BotCommand(command='refunds', description='💸 Refund history'),
+    BotCommand(command='receipt', description='🧾 Order receipts'),
+    BotCommand(command='account', description='👤 My account'),
+    BotCommand(command='done', description='✅ Confirm completed order'),
+    BotCommand(command='support', description='💬 Contact support'),
     BotCommand(command='help', description='How to use Friday'),
-    BotCommand(command='clear', description='Clear recent chat messages'),
+    BotCommand(command='clear', description='🧹 Clear chat'),
+    BotCommand(command='referral', description='👥 My referrals'),
+    BotCommand(command='faq', description='❓ Frequently asked questions'),
+    BotCommand(command='terms', description='📋 Terms & conditions'),
+    BotCommand(command='privacy', description='🔒 Data & privacy information'),
+    BotCommand(command='about', description='☀️ About FRIDAY'),
 ]
 
 PUBLIC_HELP = (
@@ -49,7 +54,11 @@ PUBLIC_HELP = (
     '/stockalert SERVICE COUNTRY — One-time stock notice\n'
     '/stockoff — Cancel stock alerts\n'
     '/promo CODE — Apply an active promotion\n'
-    '/referral — View your referral link\n\n'
+    '/referral — View your referral link\n'
+    '/faq — Common questions\n'
+    '/terms — Terms of use\n'
+    '/privacy — Data and privacy information\n'
+    '/about — About FRIDAY\n\n'
     'Use the blue Menu button beside the message field to access these commands. '
     'Only buy numbers for accounts you own or are authorized to test.'
 )
