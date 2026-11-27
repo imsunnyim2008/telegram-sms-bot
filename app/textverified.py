@@ -217,6 +217,31 @@ class TextVerifiedSms:
             self._cached_at = time.monotonic()
             return offers
 
+    async def catalogue_capabilities(self) -> dict[str, int | None]:
+        """Read-only catalogue availability, not purchase eligibility or stock."""
+        async def inspect(kind):
+            try:
+                data = await self._request("GET", "/api/pub/v2/services",
+                    params={"numberType": "mobile", "reservationType": kind})
+                if not isinstance(data, list):
+                    return kind, None
+                names = {str(r.get("serviceName", "")).lower() for r in data
+                         if isinstance(r, dict) and r.get("serviceName")
+                         and str(r.get("capability", "")).lower() in
+                         {"sms", "smsandvoicecombo"}}
+                return kind, len(names)
+            except ProviderError:
+                return kind, None
+        return dict(await asyncio.gather(*(inspect(kind) for kind in
+                    ("verification", "nonrenewable", "renewable"))))
+
+    async def confirmed_refund(self, order_id: str) -> bool:
+        """Check an already-linked order without fetching messages or purchasing."""
+        oid = self._oid(order_id)
+        details = await self._details(oid)
+        return (isinstance(details, dict) and str(details.get("id", "")) == oid
+                and str(details.get("state", "")).lower() == "verificationrefunded")
+
     async def get_country_names(self) -> dict[str, str]:
         return {US: "USA"}
 

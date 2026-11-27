@@ -2266,6 +2266,51 @@ async def held_orders(message: Message):
     await message.answer('\n'.join(lines))
 
 
+@router.message(Command('capabilities'))
+async def provider_capabilities(message: Message):
+    if not await private_admin(message):
+        return
+    provider = shop.providers.get('textverified')
+    if provider is None or not hasattr(provider, 'catalogue_capabilities'):
+        return await message.answer('TextVerified capability check unavailable.')
+    try:
+        counts = await asyncio.wait_for(provider.catalogue_capabilities(), timeout=40)
+    except Exception:
+        return await message.answer('TextVerified capability check failed. No purchases were made.')
+    labels = {'verification': 'One-time', 'nonrenewable': 'Fixed-term rental',
+              'renewable': 'Renewable rental'}
+    lines = ['TextVerified catalogue check (read-only)']
+    for kind, label in labels.items():
+        value = counts.get(kind)
+        lines.append(f'{label}: {value} listed SMS services' if value is not None
+                     else f'{label}: catalogue unavailable')
+    lines.append('Catalogue access does not establish rental eligibility, stock, or resale approval. '
+                 'No orders were created and rental purchases remain disabled.')
+    await message.answer('\n'.join(lines))
+
+
+@router.message(Command('findservice'))
+async def find_service_command(message: Message):
+    if not await private_customer(message):
+        return
+    parts = message.text.split(maxsplit=1)
+    if len(parts) != 2 or not 2 <= len(parts[1].strip()) <= 40:
+        return await message.answer('Usage: /findservice NAME')
+    query = parts[1].strip().casefold()
+    try:
+        offers = await shop.provider.get_prices()
+    except Exception:
+        return await message.answer('Service lookup temporarily unavailable.')
+    matches = sorted({p.service for p in offers if p.stock > 0
+                      and settings.service_allowed(p.service)
+                      and query in p.service.casefold()})[:15]
+    if not matches:
+        return await message.answer('No matching stocked service is currently enabled.')
+    await show_selection_menu(message, 'Matching services:', keyboard(
+        [[(name.title(), f'countries:{name}:0')] for name in matches]
+        + [[('All services', 'services:0')]]))
+
+
 @router.message(F.text)
 async def handle_pending_text(message: Message):
     # Only input explicitly requested by this bot is interpreted as an amount.

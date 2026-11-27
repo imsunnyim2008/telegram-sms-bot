@@ -217,10 +217,18 @@ class Shop:
                 return
             service, country, created = row.service, row.country, row.created_at
             provider_name = row.provider
+            oid = row.provider_order_id
             expiry = row.expires_at.replace(tzinfo=timezone.utc) if row.expires_at.tzinfo is None else row.expires_at
             linked = set((await s.scalars(select(Activation.provider_order_id).where(
                 Activation.provider_order_id.is_not(None)))).all())
         provider = self.providers.get(provider_name)
+        if provider is not None and oid and hasattr(provider, 'confirmed_refund'):
+            try:
+                if await provider.confirmed_refund(oid):
+                    await self.refund(activation_id, 'cancelled')
+            except ProviderError:
+                pass
+            return
         if provider is None or not getattr(provider, 'supports_complete_order_history', True):
             # Active-only history cannot prove that a chargeable order was not made.
             # Hold for operator review instead of risking an unverified refund.

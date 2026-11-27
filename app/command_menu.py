@@ -59,6 +59,7 @@ PUBLIC_HELP = (
     '/terms — Terms of use\n'
     '/privacy — Data and privacy information\n'
     '/about — About FRIDAY\n\n'
+    '/findservice NAME — Search enabled stocked services\n\n'
     'Use the blue Menu button beside the message field to access these commands. '
     'Only buy numbers for accounts you own or are authorized to test.'
 )
@@ -91,6 +92,7 @@ ADMIN_HELP = (
     '/reconcilepayment PAYMENT_ID — Verify and recover a finished payment\n\n'
     '/servicemode SERVICE on/off — Pause one service\n'
     '/setpromo CODE PERCENT — Set margin discount (0 disables)\n\n'
+    '/capabilities — Read-only TextVerified rental catalogue check\n\n'
     '🔒 These commands are restricted to the bot administrator and are '
     'deliberately hidden from the public Menu button. '
     'Tap the buttons below instead of typing commands. Only custom values need text input.'
