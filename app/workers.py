@@ -367,12 +367,7 @@ class Worker:
         self._paystack_cursor = rows[-1].id
         for row in rows:
             try:
-                if await paystack.settle(row.gateway_invoice_id):
-                    try:
-                        await self.shop.notifier.send(row.user_id,
-                            f'✅ Paystack deposit #{row.id} confirmed! +${row.amount_credit} wallet credit.')
-                    except Exception:
-                        log.warning('Paystack deposit credited; notification unavailable')
+                await paystack.settle(row.gateway_invoice_id, notifier=self.shop.notifier)
             except Exception:
                 log.warning('Paystack reconciliation temporarily unavailable')
                 break

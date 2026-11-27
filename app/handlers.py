@@ -1827,7 +1827,7 @@ async def deposit_receipt(target, uid, pid):
             return await target.answer('Deposit not found.')
     if row.gateway == 'paystack' and row.status == 'created':
         try:
-            await paystack.settle(row.gateway_invoice_id)
+            await paystack.settle(row.gateway_invoice_id, notifier=shop.notifier)
         except Exception:
             return await target.answer('Paystack verification is temporarily unavailable. No new charge was made.')
         async with Session() as s:

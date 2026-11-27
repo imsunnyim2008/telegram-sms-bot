@@ -443,7 +443,7 @@ async def paystack_webhook(request: Request):
         raise HTTPException(status_code=400, detail='Invalid event')
     try:
         # Acknowledge only after atomic settlement; provider retries on temporary failure.
-        await paystack.settle(reference)
+        await paystack.settle(reference, notifier=runtime['shop'].notifier)
     except Exception:
         raise HTTPException(status_code=503, detail='Payment verification unavailable')
     return {'ok': True}
