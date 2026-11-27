@@ -286,8 +286,11 @@ async def callbacks(callback: CallbackQuery):
         if data.startswith('ui:'):
             await button_action(callback, uid, data[3:])
         elif data.startswith('services:'):
-            await services(callback.message, int(data.split(':')[1]), edit=True)
+            await prompt_service_search(callback.message, uid, edit=True)
         elif data.startswith('countries:'):
+            flow = await read_flow(uid)
+            if flow and flow.get('type') == 'service_search':
+                await clear_flow(uid)
             _, service, page = data.split(':')
             await countries(callback.message, service, int(page), edit=True,
                             viewer_id=uid)
@@ -467,8 +470,11 @@ async def countries(target, service: str, page: int = 0, *, edit: bool = False,
         nav.append(('Next ➡️', f'countries:{service}:{page+1}'))
     if nav:
         rows.append(nav)
-    rows.append([('Back to services', 'services:0')])
-    await show_selection_menu(target, f'Select a country for {service}:',
+    rows.append([('🔎 Search another service', 'services:0'), ('⬅️ Main menu', 'menu:home')])
+    await show_selection_menu(target, f'📱 {service.title()}\\n'
+                              'Plan: One-time\\n'
+                              'Available countries, current prices and stock:\\n'
+                              'Select an available country to review the order.',
                               keyboard(rows), edit=edit)
 
 # The last step of a pricing or wallet wizard survives Render restarts.
@@ -708,7 +714,7 @@ async def admin_pricing_command(message: Message):
 @router.message(Command('buy', 'order', 'number'))
 async def buy_command(message: Message):
     if await allowed(message.from_user.id, message):
-        await services(message)
+        await prompt_service_search(message, message.from_user.id)
 
 
 @router.message(Command('balance'))
@@ -2289,26 +2295,50 @@ async def provider_capabilities(message: Message):
     await message.answer('\n'.join(lines))
 
 
+async def prompt_service_search(target, uid, *, edit=False):
+    await save_flow(uid, {'type': 'service_search'})
+    await show_selection_menu(target,
+        '🔎 Enter the service name you want.\n\n'
+        'Example: Instagram\n'
+        'Friday will show the available countries, prices and stock.',
+        keyboard([[('⬅️ Main menu', 'menu:home')]]), edit=edit)
+
+
+def matching_service_names(offers, query):
+    query = query.strip().casefold()
+    names = {p.service for p in offers if p.stock > 0 and settings.service_allowed(p.service)}
+    exact = sorted(name for name in names if name.casefold() == query)
+    return exact or sorted(name for name in names if query in name.casefold())[:15]
+
+
+async def search_service(target, uid, query):
+    if not 2 <= len(query.strip()) <= 50:
+        return await target.answer('Enter a service name (2–50 characters).')
+    try:
+        offers = await shop.provider.get_prices()
+    except Exception:
+        return await target.answer('Live service information is temporarily unavailable. Try again.')
+    matches = matching_service_names(offers, query)
+    if not matches:
+        return await target.answer('No matching enabled service is currently in stock. Enter another name.')
+    await clear_flow(uid)
+    if len(matches) == 1:
+        return await countries(target, matches[0], viewer_id=uid)
+    await show_selection_menu(target, 'Matching services — select the one you want:',
+        keyboard([[(name.title(), f'countries:{name}:0')] for name in matches]
+                 + [[('🔎 Search again', 'services:0'), ('⬅️ Main menu', 'menu:home')]]))
+
+
 @router.message(Command('findservice'))
 async def find_service_command(message: Message):
     if not await private_customer(message):
         return
+    uid = message.from_user.id
     parts = message.text.split(maxsplit=1)
-    if len(parts) != 2 or not 2 <= len(parts[1].strip()) <= 40:
-        return await message.answer('Usage: /findservice NAME')
-    query = parts[1].strip().casefold()
-    try:
-        offers = await shop.provider.get_prices()
-    except Exception:
-        return await message.answer('Service lookup temporarily unavailable.')
-    matches = sorted({p.service for p in offers if p.stock > 0
-                      and settings.service_allowed(p.service)
-                      and query in p.service.casefold()})[:15]
-    if not matches:
-        return await message.answer('No matching stocked service is currently enabled.')
-    await show_selection_menu(message, 'Matching services:', keyboard(
-        [[(name.title(), f'countries:{name}:0')] for name in matches]
-        + [[('All services', 'services:0')]]))
+    if len(parts) != 2:
+        return await prompt_service_search(message, uid)
+    await save_flow(uid, {'type': 'service_search'})
+    await search_service(message, uid, parts[1])
 
 
 @router.message(F.text)
@@ -2331,6 +2361,10 @@ async def handle_pending_text(message: Message):
                 return await message.answer('✅ Outage acknowledged. Monitoring continues.')
     flow = await read_flow(uid)
     if not flow:
+        return
+    if flow.get('type') == 'service_search':
+        if await private_customer(message):
+            return await search_service(message, uid, raw)
         return
     if flow.get('type') == 'bank_input':
         return await bank_input(message, uid, flow, raw)
