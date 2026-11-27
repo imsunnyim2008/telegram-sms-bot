@@ -192,6 +192,7 @@ class TextVerifiedSms:
                 async with sem:
                     request = {"serviceName": service, "capability": "sms",
                                "numberType": "mobile"}
+                    stage = 'inventory'
                     try:
                         inventory = await self._request(
                             "POST", "/api/pub/v2/inventory/verifications",
@@ -200,6 +201,7 @@ class TextVerifiedSms:
                         qty = int(inventory["availableQuantity"])
                         if qty <= 0:
                             return None
+                        stage = 'pricing'
                         pricing = await self._request(
                             "POST", "/api/pub/v2/pricing/verifications",
                             payload={**request, "areaCode": False, "carrier": False},
@@ -208,13 +210,16 @@ class TextVerifiedSms:
                         if cost == 0:
                             return None
                         return PriceItem(service, US, cost, qty)
-                    except (ProviderError, ValueError, TypeError, KeyError):
+                    except (ProviderError, ValueError, TypeError, KeyError) as exc:
                         failures += 1
-                        log.warning("TextVerified quote unavailable for a permitted service")
+                        # Never log provider bodies, phone numbers, tokens or raw errors.
+                        status = re.search(r'HTTP (\d{3})', str(exc)) if isinstance(exc, ProviderError) else None
+                        log.warning('TextVerified quote unavailable: service=%s stage=%s reason=%s',
+                                    service, stage, status.group(1) if status else type(exc).__name__)
                         return None
 
             found = await asyncio.gather(*(quote(s) for s in sorted(allowed)))
-            if fresh and allowed and failures == len(allowed):
+            if allowed and failures == len(allowed):
                 raise ProviderError('TextVerified inventory/pricing requests all failed')
             offers = [p for p in found if p is not None]
             self._cache = offers

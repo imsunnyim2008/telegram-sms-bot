@@ -347,7 +347,20 @@ async def callbacks(callback: CallbackQuery):
         elif data.startswith('check:'):
             await check_sms(callback.message, uid, int(data.split(':')[1]), edit=True)
         elif data.startswith('cancel:'):
-            await shop.cancel(uid, int(data.split(':')[1]))
+            aid = int(data.split(':')[1])
+            try:
+                await shop.cancel(uid, aid)
+            except BotError as exc:
+                if 'not confirmed' not in str(exc) and 'did not confirm' not in str(exc):
+                    raise
+                await show_selection_menu(callback.message,
+                    f'Order #{aid}: cancellation not confirmed by provider.\n'
+                    'Refund is not confirmed. Your balance has not changed. '
+                    'Check order status or contact support for review.',
+                    keyboard([[('🔄 Check status', f'check:{aid}')],
+                              [('🎧 Support', f'ui:support:{aid}')],
+                              [('📋 My orders', 'orders')]]), edit=True, track=False)
+                return
             await show_selection_menu(
                 callback.message, 'Cancellation submitted. Check /orders for current status.',
                 keyboard([[('⬅️ Main menu', 'menu:home')]]), edit=True, track=False,
