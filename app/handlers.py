@@ -288,14 +288,17 @@ async def callbacks(callback: CallbackQuery):
     if not await allowed(uid, callback.message):
         return
     try:
-        if data == 'paystack:start':
+        if data == 'paystack:start:bank_transfer':
+            await prompt_topup(callback.message, uid, edit=True)
+        elif data in ('paystack:start', 'paystack:start:card'):
             await clear_flow(uid)
             if not paystack.eligible(uid):
-                return await callback.message.answer('Paystack deposits are not enabled yet.')
+                return await callback.message.answer('This payment method is not available for your account.')
+            label = '💳 PAYSTACK DEPOSIT'
             await save_flow(uid, {'type': 'paystack_amount'})
             await show_selection_menu(callback.message,
-                f'🇳🇬 Paystack — enter NGN amount (minimum ₦500). Rate: ₦{settings.paystack_ngn_per_usd} per USD.',
-                keyboard([[('⬅️ Payment methods', 'topup')]]), edit=True)
+                f'{label}\n\nCurrency: NGN\nMinimum deposit: ₦500\nExchange rate: ₦{settings.paystack_ngn_per_usd:,} / $1\n\nEnter the amount to deposit.',
+                keyboard([[('⬅️ Payment Methods', 'topup')]]), edit=True)
         elif data.startswith('ui:'):
             await button_action(callback, uid, data[3:])
         elif data.startswith('services:'):
@@ -900,25 +903,25 @@ async def send_topup_invoice(target, uid: int, raw: str) -> bool:
 async def prompt_topup(target, uid: int, *, edit: bool = False, crypto_only=False):
     if hasattr(target, 'chat') and target.chat.type != 'private':
         return await target.answer('Open Friday in a private chat to top up.')
-    cfg = await bank.config(Session)
     if not crypto_only:
         await clear_flow(uid)
-        status = '' if bank.ready(cfg) else '\nBank transfer is not yet enabled; configuration is required.'
-        options = [[('💳 Paystack — card / bank transfer', 'paystack:start')]] if paystack.eligible(uid) else []
-        return await show_selection_menu(target, 'Choose a deposit method:' + status,
-            keyboard(options + [[('🇳🇬 Nigerian bank transfer', 'ui:bankstart')],
-                      [('🪙 Cryptocurrency', 'ui:bankcrypto')],
-                      [('My bank claims', 'ui:bankclaims')], [('⬅️ Main menu', 'menu:home')]]), edit=edit)
+        options = []
+        if paystack.eligible(uid):
+            options += [[('💳 PAYSTACK TRANSFER OR DEBIT CARD', 'paystack:start')]]
+        options += [[('🪙 Cryptocurrency (USD)', 'ui:bankcrypto')],
+                    [('📄 Deposit History', 'ui:deposits')],
+                    [('⬅️ Main Menu', 'menu:home')]]
+        await show_selection_menu(target,
+            '💳 WALLET TOP-UP\n\nChoose a deposit method.\n'
+            'Your wallet is credited automatically after payment confirmation.',
+            keyboard(options), edit=edit)
+        return
     await save_flow(uid, {'type': 'topup'})
     await show_selection_menu(
         target,
-        f'💳 Enter the amount you want to top up (USD).\n'
-        f'✅ Minimum deposit: ${settings.min_topup}\n'
-        f'❌ Amounts below ${settings.min_topup} will be rejected.\n\n'
-        'Type an amount such as 5, 10, or 20 and send it.',
-        keyboard([[('⬅️ Cancel / Main menu', 'menu:home')]]),
-        edit=edit,
-    )
+        f'🪙 CRYPTOCURRENCY DEPOSIT\n\nMinimum deposit: ${settings.min_topup}\n\n'
+        'Enter your desired amount in USD.',
+        keyboard([[('⬅️ Payment Methods', 'topup')]]), edit=edit)
 
 
 @router.message(Command('topup', ignore_case=True))
@@ -1910,6 +1913,8 @@ async def bank_button(target, uid, parts):
     if name == 'bankcrypto':
         await prompt_topup(target, uid, edit=True, crypto_only=True)
     elif name == 'bankstart':
+        if uid not in settings.admins:
+            return await prompt_topup(target, uid, edit=True)
         cfg = await bank.config(Session)
         if not bank.ready(cfg):
             if uid in settings.admins:
@@ -2561,8 +2566,9 @@ async def handle_pending_text(message: Message):
                 return await message.answer(str(exc))
             await save_flow(uid, {'type': 'paystack_email', 'amount': str(ngn), 'credit': str(credit)})
             return await show_selection_menu(message,
-                f'Pay ₦{ngn} to receive ${credit} wallet credit. Enter your email for Paystack checkout and receipt. '
-                'Your email is sent to Paystack. Do not enter card details here.',
+                f'📋 DEPOSIT SUMMARY\n\nAmount: ₦{ngn:,.2f}\nWallet credit: ${credit:.4f}\n\n'
+                'Enter your email address for the secure checkout and receipt. '
+                'Your email is shared with Paystack; never send card details here.',
                 keyboard([[('⬅️ Cancel', 'topup')]]))
         try:
             _, credit = paystack.quote(flow['amount'])
@@ -2573,9 +2579,9 @@ async def handle_pending_text(message: Message):
             pid, url, ngn, credit = await paystack.create_deposit(uid, flow['amount'], raw)
         except PaystackError:
             return await message.answer('Checkout could not be confirmed. Open My deposits or contact support before retrying.')
-        return await message.answer(f'Paystack deposit #{pid}: ₦{ngn} → ${credit}. Pay only through the secure checkout.',
-            reply_markup=InlineKeyboardMarkup(inline_keyboard=[[InlineKeyboardButton(text='Pay with Paystack', url=url)],
-                [InlineKeyboardButton(text='✅ Verify my payment', callback_data=f'ui:depositreceipt:{pid}')]]))
+        return await message.answer(f'🔐 SECURE CHECKOUT\n\nDeposit: #{pid}\nAmount: ₦{ngn:,.2f}\nWallet credit: ${credit:.4f}\n\nYour wallet will be credited automatically after confirmation.',
+            reply_markup=InlineKeyboardMarkup(inline_keyboard=[[InlineKeyboardButton(text='Continue to Secure Payment', url=url)],
+                [InlineKeyboardButton(text='🔄 Check Payment Status', callback_data=f'ui:depositreceipt:{pid}')]]))
     if flow.get('type') == 'service_search':
         if await private_customer(message):
             return await search_service(message, uid, raw)

@@ -261,7 +261,8 @@ async def test_topup_always_shows_both_choices_and_admin_bank_setup(setup_databa
     message = Target(uid=7031009238)
     await handlers.prompt_topup(message, 7031009238)
     buttons = message.answers[-1][1]['reply_markup'].inline_keyboard
-    assert {'ui:bankstart', 'ui:bankcrypto'} <= {b.callback_data for row in buttons for b in row}
+    assert {'ui:bankcrypto', 'ui:deposits'} <= {b.callback_data for row in buttons for b in row}
+    assert 'ui:bankstart' not in {b.callback_data for row in buttons for b in row}
     await handlers.bank_button(message, 7031009238, ['bankstart'])
     assert 'Set account name' in str(message.edits[-1][1]['reply_markup'])
     assert not gateway.invoices
@@ -305,3 +306,14 @@ async def test_admin_balance_shows_provider_funds_only_in_private(setup_database
     await handlers.show_balance(customer, 99)
     assert 'Your balance:' in customer.answers[-1][0]
     assert 'Provider balance' not in customer.answers[-1][0]
+
+
+@pytest.mark.asyncio
+async def test_topup_combined_paystack_with_crypto_and_no_standalone_bank_buttons(setup_database, monkeypatch):
+    monkeypatch.setattr(handlers.paystack, 'eligible', lambda uid: True)
+    message = Target(uid=99)
+    await handlers.prompt_topup(message, 99)
+    buttons = [b for row in message.answers[-1][1]['reply_markup'].inline_keyboard for b in row]
+    assert [b.callback_data for b in buttons] == ['paystack:start', 'ui:bankcrypto', 'ui:deposits', 'menu:home']
+    assert buttons[0].text == '💳 PAYSTACK TRANSFER OR DEBIT CARD'
+    assert not any('bank transfer' in b.text.lower() for b in buttons)

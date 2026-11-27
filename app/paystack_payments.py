@@ -51,11 +51,13 @@ class PaystackLive(PaystackTest):
                 and type(data.get('amount')) is int and data['amount'] == expected_kobo)
 
 
-async def create_deposit(uid, raw, email, *, gateway=None):
+async def create_deposit(uid, raw, email, *, gateway=None, channel=None):
     if not eligible(uid):
         raise PaystackError('Paystack deposits are not enabled for this account.')
     if len(email) > 254 or not re.fullmatch(r'[^\s@]+@[^\s@]+\.[^\s@]+', email):
         raise PaystackError('Enter your valid payment email.')
+    if channel not in (None, 'card', 'bank_transfer'):
+        raise PaystackError('Unsupported payment method')
     ngn, credit = quote(raw)
     reference = 'friday-' + uuid.uuid4().hex
     async with Session.begin() as s:
@@ -72,7 +74,7 @@ async def create_deposit(uid, raw, email, *, gateway=None):
     owned = gateway is None
     gateway = gateway or PaystackLive(settings.paystack_secret_key)
     try:
-        url = await gateway.initialize(email, int(ngn * 100), reference)
+        url = await gateway.initialize(email, int(ngn * 100), reference, channel=channel)
     finally:
         if owned:
             await gateway.aclose()

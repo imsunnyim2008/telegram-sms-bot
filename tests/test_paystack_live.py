@@ -26,6 +26,7 @@ async def test_live_credit_once_with_mock(setup_database, monkeypatch):
         if request.method == 'POST':
             body = json.loads(request.content)
             state['reference'] = body['reference']
+            assert body['channels'] == ['card', 'bank_transfer']
             return httpx.Response(200, json={'status':True,'data':{
                 'reference':body['reference'],'authorization_url':'https://checkout.paystack.com/demo'}})
         return httpx.Response(200, json={'status':True,'data':{
