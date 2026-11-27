@@ -91,6 +91,16 @@ async def test_country_list_paginations_edit_same_message_not_send_new_ones(monk
 
     monkeypatch.setattr(handlers, 'shop', Shop())
     monkeypatch.setattr(handlers, 'allowed', allowed)
+    flows = {}
+    async def read_flow(uid):
+        return flows.get(uid)
+    async def save_flow(uid, flow):
+        flows[uid] = flow
+    async def clear_flow(uid):
+        flows.pop(uid, None)
+    monkeypatch.setattr(handlers, 'read_flow', read_flow)
+    monkeypatch.setattr(handlers, 'save_flow', save_flow)
+    monkeypatch.setattr(handlers, 'clear_flow', clear_flow)
     msg = FakeMessage()
     await handlers.callbacks(FakeCallback('countries:telegram:0', msg))
     await handlers.callbacks(FakeCallback('countries:telegram:1', msg))
@@ -98,6 +108,8 @@ async def test_country_list_paginations_edit_same_message_not_send_new_ones(monk
     await handlers.callbacks(FakeCallback('services:0', msg))
     assert [call[0] for call in msg.calls] == [
         'ack', 'edit', 'ack', 'edit', 'ack', 'edit', 'ack', 'edit']
+    assert 'Enter the service name' in msg.calls[-1][1]
+    assert flows[123] == {'type': 'service_search'}
     first_row = msg.calls[1][2]['reply_markup'].inline_keyboard[0][0]
     assert first_row.text.startswith('🇺🇸 USA')
     assert first_row.callback_data == 'preview:telegram:0'
